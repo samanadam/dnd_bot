@@ -1,0 +1,53 @@
+services:
+  dnd-bot:
+    build: .
+    image: dnd-session-bot:latest
+    container_name: dnd-bot
+    restart: unless-stopped
+    env_file: .env
+
+    # Reap zombie ffmpeg processes (mp3 mode) and forward signals cleanly.
+    init: true
+
+    # Shutdown finalizes every in-progress recording to disk before exiting.
+    # Docker's 10s default would SIGKILL that halfway through and lose audio.
+    stop_grace_period: 60s
+    volumes:
+      # Sessions, transcripts, exports, backups and the SQLite database.
+      - ./data:/data
+      # Whisper model cache. Keep this volume or the `medium` model is
+      # re-downloaded (~1.5 GB) on every container recreate.
+      - whisper-models:/models
+
+    # This box is shared with other services on 8 GB RAM / 4 GB VRAM. These are
+    # a STARTING POINT, not a tuned answer: watch `docker stats` during a real
+    # transcription run with the `medium` model and adjust. Too low and the
+    # container gets OOM-killed mid-job; too high and the rest of the box
+    # starves while transcription runs.
+    mem_limit: 4g
+    mem_reservation: 1g
+    cpus: 2.0
+
+    # Transcription is deferred to quiet hours, so a lower priority here costs
+    # nothing during play and protects the other services at night.
+    cpu_shares: 512
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # GPU passthrough, for when a bigger card shows up. Requires the NVIDIA
+    # container toolkit on the host; also set WHISPER_DEVICE=cuda and
+    # WHISPER_COMPUTE_TYPE=float16 in .env.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  whisper-models:
