@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libopus0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: black --check .
+
+      - name: Test
+        run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: dnd-session-bot:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          # Imports every module and exits cleanly; catches a broken image
+          # without needing a Discord token.
+          docker run --rm dnd-session-bot:ci python -c "
+          import dnd_bot.bot, dnd_bot.recorder, dnd_bot.sinks, dnd_bot.chunking
+          import discord, faster_whisper, aiosqlite, numpy
+          print('image OK', discord.__version__, faster_whisper.__version__)
+          "
+          docker run --rm dnd-session-bot:ci python -c "import nacl; print('voice deps OK')"
+          docker run --rm dnd-session-bot:ci ffmpeg -version | head -1
+          docker run --rm --entrypoint sh dnd-session-bot:ci -c 'test "$(id -u)" -ne 0 && echo "non-root OK"'

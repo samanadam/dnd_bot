@@ -54,6 +54,9 @@ pnpm-debug.log*
 .next/
 out/
 
+# --- Model cache (should live in a Docker volume, never the repo) ---
+models/
+
 # --- Databases / data ---
 *.db
 *.sqlite
