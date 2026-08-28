@@ -52,8 +52,8 @@ that code-switching well enough without special-casing.
 ```
 
 Transcription is **deliberately not immediate**. On CPU with the `medium` model
-it is slow, and this box is shared with other services — so the heavy step is
-pushed into the night. Expect a transcript the next morning, not right after
+it is slow, and a self-hosted box is typically shared with other services — so
+the heavy step is pushed into the night. Expect a transcript the next morning, not right after
 `/session stop`.
 
 ### On recording two channels at once
@@ -373,7 +373,7 @@ is safe to run repeatedly.
 ## Tuning resource limits
 
 `docker-compose.yml` ships with `mem_limit: 4g`, `cpus: 2.0` and
-`cpu_shares: 512`. Those are a **starting point on an 8 GB / 4 GB-VRAM shared
+`cpu_shares: 512`. Those are a **starting point for a small shared
 box, not a tuned answer.** Watch a real run:
 
 ```bash
@@ -397,8 +397,8 @@ full mel spectrogram. Measured on this codebase:
 | 20 min | 661 MB |
 
 That is ~33 MB per minute, linear, so an unchunked four-hour session would need
-roughly **8 GB for a single speaker** — an instant OOM kill against
-`mem_limit: 4g`, on a box with 8 GB total.
+roughly **8 GB for a single speaker** — an instant OOM kill against the
+default `mem_limit: 4g`, and out of reach for a small host entirely.
 
 So each speaker track is split into `TRANSCRIBE_CHUNK_MINUTES` pieces (default
 10) before transcription, and each chunk is deleted as soon as it is done.

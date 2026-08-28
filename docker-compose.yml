@@ -19,8 +19,8 @@ services:
       # re-downloaded (~1.5 GB) on every container recreate.
       - whisper-models:/models
 
-    # This box is shared with other services on 8 GB RAM / 4 GB VRAM. These are
-    # a STARTING POINT, not a tuned answer: watch `docker stats` during a real
+    # Sized for a small host shared with other services. These are a STARTING
+    # POINT, not a tuned answer: watch `docker stats` during a real
     # transcription run with the `medium` model and adjust. Too low and the
     # container gets OOM-killed mid-job; too high and the rest of the box
     # starves while transcription runs.
