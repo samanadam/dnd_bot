@@ -3,8 +3,8 @@
 faster-whisper decodes the whole input file into memory before it starts
 streaming segments out, at roughly 33 MB per minute of 48 kHz stereo audio. A
 four-hour session would therefore need ~8 GB for a single speaker - far past
-what this box has. Splitting each track into fixed-length chunks caps peak
-memory at the chunk size regardless of how long the session ran.
+what a small self-hosted box has. Splitting each track into fixed-length chunks
+caps peak memory at the chunk size regardless of how long the session ran.
 
 Boundaries are nudged onto the quietest point near the target time so a chunk
 edge does not land in the middle of a word.

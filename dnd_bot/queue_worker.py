@@ -1,7 +1,7 @@
 """Deferred transcription queue worker.
 
-Transcription is the only genuinely heavy thing this bot does, and it shares an
-8 GB / 4 GB-VRAM box with other services. So it is: (a) deferred to a quiet-hours
+Transcription is the only genuinely heavy thing this bot does, and a self-hosted
+box usually runs other services alongside it. So it is: (a) deferred to a quiet-hours
 window, (b) strictly one job at a time — the worker is a single task that awaits
 each job to completion before looking at the next one, and (c) persisted in
 SQLite so a redeploy loses nothing.
