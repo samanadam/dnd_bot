@@ -283,6 +283,63 @@ What the compose file does for you, and why:
 Set `TZ` in `.env` if you want container log timestamps in local time; transcript
 timestamps always follow `TIMEZONE` regardless.
 
+### Hosting on a laptop
+
+A spare laptop makes a fine host — the battery is a free UPS — but three of its
+defaults will break this bot specifically, because the heavy work happens at
+night with nobody watching.
+
+**1. It must not sleep.** Closing the lid suspends the machine, which kills a
+live recording and stops the nightly transcription queue dead.
+
+```bash
+sudo tee /etc/systemd/logind.conf.d/no-suspend.conf >/dev/null <<'EOF'
+[Login]
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+EOF
+sudo systemctl restart systemd-logind
+
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+```
+
+**2. Automatic reboots collide with the transcription window.** Ubuntu's
+`unattended-upgrades` reboots at 02:00 by default — the middle of quiet hours.
+A restart mid-job is survivable (the queue is persisted and the job re-runs),
+but it wastes the whole night's work. Move it outside your window:
+
+```bash
+sudo sed -i 's|^//\s*Unattended-Upgrade::Automatic-Reboot-Time.*|Unattended-Upgrade::Automatic-Reboot-Time "10:00";|'   /etc/apt/apt.conf.d/50unattended-upgrades
+```
+
+**3. Heat.** Transcription pins the CPU for hours at a time, and a closed laptop
+on a desk has poor airflow. Prop the lid open or raise the chassis, and watch
+the first long job:
+
+```bash
+sudo apt install -y lm-sensors && sensors        # during a transcription run
+```
+
+If it throttles, lower `cpus:` in `docker-compose.yml` or switch to
+`WHISPER_MODEL=small`. Sustained thermal throttling costs you more time than a
+smaller model would.
+
+Also worth doing:
+
+- **Use ethernet if you can.** Voice receive over Wi-Fi drops more often. The
+  bot reconnects, but each drop leaves a gap in that speaker's timeline. If
+  Wi-Fi is unavoidable, disable power saving:
+  `echo -e "[connection]
+wifi.powersave = 2" | sudo tee /etc/NetworkManager/conf.d/wifi-powersave.conf`
+- **Install Docker from Docker's own repo, not snap.** The snap package is
+  confined and handles bind mounts poorly.
+- **Enable Docker at boot:** `sudo systemctl enable --now docker`.
+- **Check the disk before a long session:** `df -h`. Laptop SSDs are often
+  small, and one session can be 14 GB.
+- No inbound ports are needed. The bot only makes outbound connections to
+  Discord, so nothing has to be forwarded or exposed.
+
 ### Upgrading
 
 ```bash
