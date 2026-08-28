@@ -14,7 +14,9 @@ services:
     stop_grace_period: 60s
     volumes:
       # Sessions, transcripts, exports, backups and the SQLite database.
-      - ./data:/data
+      # Audio is bulky - roughly 0.7 GB per hour PER SPEAKER - so point
+      # DATA_HOST_DIR at a disk with room rather than wherever the repo sits.
+      - ${DATA_HOST_DIR:-./data}:/data
       # Whisper model cache. Keep this volume or the `medium` model is
       # re-downloaded (~1.5 GB) on every container recreate.
       - whisper-models:/models

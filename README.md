@@ -226,24 +226,47 @@ Beyond that:
 
 ## Production deployment
 
-The image runs as an unprivileged user (uid 10001), which means the bind-mounted
-data directory must be writable by that user. Docker creates `./data` owned by
-root, so **do this once before the first start** or the bot exits immediately
-with a `Configuration error` naming this exact fix:
+### Sizing the data directory first
+
+Discord delivers 48 kHz stereo audio, and every speaker gets their own track, so
+raw session audio is bulky:
+
+| session length | 3 players | 5 players | 7 players |
+| --- | --- | --- | --- |
+| 2 h | 4.1 GB | 6.9 GB | 9.7 GB |
+| 3 h | 6.2 GB | 10.4 GB | 14.5 GB |
+| 4 h | 8.3 GB | 13.8 GB | 19.4 GB |
+
+That is ~0.7 GB per hour **per speaker**, kept for `AUDIO_RETENTION_DAYS` (7 by
+default) after transcription. Transcripts are tiny and kept forever; it is the
+audio that needs room. Point `DATA_HOST_DIR` at a disk that has it — the code
+can live anywhere, the data should not follow it by accident.
+
+### First run
+
+The image runs as an unprivileged user (uid 10001), so the data directory must
+be writable by that user. Docker creates a bind-mounted directory owned by root,
+so **do this once before the first start** or the bot exits immediately with a
+`Configuration error` naming this exact fix:
 
 ```bash
-mkdir -p data
-sudo chown -R 10001:10001 data
-```
+git clone https://github.com/samanadam/dnd_bot.git /opt/dnd-bot
+cd /opt/dnd-bot
 
-Then:
-
-```bash
 cp .env.example .env
-$EDITOR .env                      # DISCORD_TOKEN, GUILD_ID, ADMIN_USER_ID
+$EDITOR .env      # DISCORD_TOKEN, GUILD_ID, ADMIN_USER_ID, DATA_HOST_DIR
+
+# Whatever DATA_HOST_DIR points at:
+sudo mkdir -p /srv/dnd-bot-data
+sudo chown -R 10001:10001 /srv/dnd-bot-data
+
 docker compose up -d --build
 docker compose logs -f
 ```
+
+Wait for `Whisper model medium ready`, then `Bot ready`. The first start
+downloads ~1.5 GB of model and needs internet; afterwards it runs fully offline
+as long as the `whisper-models` volume survives.
 
 What the compose file does for you, and why:
 
