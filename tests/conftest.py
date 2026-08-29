@@ -23,7 +23,7 @@ def config(tmp_path: Path) -> Config:
         audio_retention_days=7,
         disk_warning_threshold_mb=1,
         admin_user_id=999,
-        queue_poll_seconds=1,
+        inbox_poll_seconds=1,
     )
 
 

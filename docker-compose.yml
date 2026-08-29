@@ -17,22 +17,13 @@ services:
       # Audio is bulky - roughly 0.7 GB per hour PER SPEAKER - so point
       # DATA_HOST_DIR at a disk with room rather than wherever the repo sits.
       - ${DATA_HOST_DIR:-./data}:/data
-      # Whisper model cache. Keep this volume or the `medium` model is
-      # re-downloaded (~1.5 GB) on every container recreate.
-      - whisper-models:/models
 
-    # Sized for a small host shared with other services. These are a STARTING
-    # POINT, not a tuned answer: watch `docker stats` during a real
-    # transcription run with the `medium` model and adjust. Too low and the
-    # container gets OOM-killed mid-job; too high and the rest of the box
-    # starves while transcription runs.
-    mem_limit: 4g
-    mem_reservation: 1g
-    cpus: 2.0
-
-    # Transcription is deferred to quiet hours, so a lower priority here costs
-    # nothing during play and protects the other services at night.
-    cpu_shares: 512
+    # This half only records: it writes packets to disk and shells out to
+    # ffmpeg once per session. Whisper runs elsewhere, which is why these are
+    # a fraction of what the combined bot needed - the smallest VPS is enough.
+    mem_limit: 1g
+    mem_reservation: 256m
+    cpus: 1.0
 
     logging:
       driver: json-file
@@ -40,16 +31,4 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # GPU passthrough, for when a bigger card shows up. Requires the NVIDIA
-    # container toolkit on the host; also set WHISPER_DEVICE=cuda and
-    # WHISPER_COMPUTE_TYPE=float16 in .env.
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
 
-volumes:
-  whisper-models:

@@ -74,27 +74,42 @@ async def test_wal_mode_is_enabled(tmp_path: Path):
         await db.close()
 
 
-async def test_a_session_cannot_be_queued_twice(tmp_path: Path):
+async def test_a_session_is_only_exported_once(tmp_path: Path):
     db = await make_db(tmp_path)
     try:
         await seed_session(db)
-        assert await db.enqueue("s1") is not None
-        assert await db.enqueue("s1") is None
+        assert await db.mark_exported("s1") is not None
+        assert await db.mark_exported("s1") is None
         assert await db.pending_count() == 1
+        assert await db.session_state("s1") == "exported"
     finally:
         await db.close()
 
 
-async def test_stuck_processing_jobs_are_requeued(tmp_path: Path):
+async def test_a_session_moves_through_the_handover(tmp_path: Path):
     db = await make_db(tmp_path)
     try:
         await seed_session(db)
-        job_id = await db.enqueue("s1")
-        await db.mark_job(job_id, "processing")
-        assert await db.pending_count() == 0
+        await db.mark_exported("s1")
 
-        assert await db.reset_stuck_jobs() == 1
-        assert await db.pending_count() == 1
+        waiting = await db.awaiting_transcription()
+        assert [row["session_id"] for row in waiting] == ["s1"]
+
+        await db.mark_session_state("s1", "done")
+        assert await db.session_state("s1") == "done"
+        assert await db.pending_count() == 0
+        assert await db.awaiting_transcription() == []
+    finally:
+        await db.close()
+
+
+async def test_state_can_be_set_for_a_session_never_exported(tmp_path: Path):
+    """A recovered session may reach the handover table late."""
+    db = await make_db(tmp_path)
+    try:
+        await seed_session(db)
+        await db.mark_session_state("s1", "done")
+        assert await db.session_state("s1") == "done"
     finally:
         await db.close()
 

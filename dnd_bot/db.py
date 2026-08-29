@@ -233,29 +233,58 @@ class Database:
 
     # -- transcription queue ----------------------------------------------
 
-    async def enqueue(self, session_id: str) -> int | None:
-        """Queue a session for transcription. No-op if it is already queued."""
+    async def mark_exported(self, session_id: str) -> int | None:
+        """Record that a session is staged and waiting for the transcriber.
+
+        The table was a work queue when transcription happened in-process. It
+        now tracks where a session has got to in the handover: exported ->
+        transcribing -> done.
+        """
         cursor = await self.conn.execute(
-            "SELECT id FROM transcription_queue WHERE session_id = ? "
-            "AND status IN ('pending', 'processing')",
+            "SELECT id FROM transcription_queue WHERE session_id = ? AND status != 'done'",
             (session_id,),
         )
         if await cursor.fetchone():
             return None
         cursor = await self.conn.execute(
             "INSERT INTO transcription_queue (session_id, queued_at, status) VALUES (?, ?, ?)",
-            (session_id, to_iso(utcnow()), "pending"),
+            (session_id, to_iso(utcnow()), "exported"),
         )
         await self.conn.commit()
         return cursor.lastrowid
 
-    async def next_pending_job(self) -> dict[str, Any] | None:
+    async def mark_session_state(self, session_id: str, status: str, **fields: Any) -> None:
+        """Move a session along the handover, creating the row if it is missing."""
+        payload: dict[str, Any] = {"status": status, **fields}
+        assignments = ", ".join(f"{key} = ?" for key in payload)
         cursor = await self.conn.execute(
-            "SELECT * FROM transcription_queue WHERE status = 'pending' "
-            "ORDER BY queued_at, id LIMIT 1"
+            f"UPDATE transcription_queue SET {assignments} WHERE session_id = ?",
+            (*payload.values(), session_id),
+        )
+        if not cursor.rowcount:
+            await self.conn.execute(
+                "INSERT INTO transcription_queue (session_id, queued_at, status) VALUES (?, ?, ?)",
+                (session_id, to_iso(utcnow()), status),
+            )
+        await self.conn.commit()
+
+    async def session_state(self, session_id: str) -> str | None:
+        cursor = await self.conn.execute(
+            "SELECT status FROM transcription_queue WHERE session_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        return row["status"] if row else None
+
+    async def awaiting_transcription(self) -> list[dict[str, Any]]:
+        """Sessions staged for the transcriber that have not come back yet."""
+        cursor = await self.conn.execute(
+            "SELECT q.session_id, q.queued_at, q.status, s.name FROM transcription_queue q "
+            "LEFT JOIN sessions s ON s.id = q.session_id "
+            "WHERE q.status != 'done' ORDER BY q.queued_at"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def mark_job(self, job_id: int, status: str, **fields: Any) -> None:
         payload: dict[str, Any] = {"status": status, **fields}
@@ -272,18 +301,10 @@ class Database:
         )
         await self.conn.commit()
 
-    async def reset_stuck_jobs(self) -> int:
-        """Jobs left 'processing' by a crash are re-queued on startup."""
-        cursor = await self.conn.execute(
-            "UPDATE transcription_queue SET status = 'pending', started_at = NULL "
-            "WHERE status = 'processing'"
-        )
-        await self.conn.commit()
-        return cursor.rowcount or 0
-
     async def pending_count(self) -> int:
+        """Sessions staged but not yet transcribed."""
         cursor = await self.conn.execute(
-            "SELECT COUNT(*) AS n FROM transcription_queue WHERE status = 'pending'"
+            "SELECT COUNT(*) AS n FROM transcription_queue WHERE status != 'done'"
         )
         row = await cursor.fetchone()
         return int(row["n"]) if row else 0

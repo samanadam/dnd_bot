@@ -131,24 +131,3 @@ async def test_backup_produces_a_readable_copy(tmp_path: Path):
         assert await copy.character_map() == {"10": "Thorin"}
     finally:
         await copy.close()
-
-
-def test_export_excludes_temporary_chunk_files(tmp_path: Path):
-    """Chunks are duplicates of the tracks; shipping them would double the zip."""
-    import zipfile
-
-    from dnd_bot.chunking import CHUNK_DIR_NAME
-
-    sessions_root = tmp_path / "sessions"
-    paths.ensure_session_dirs(sessions_root, "s1")
-    paths.finalized_audio_path(sessions_root, "s1", "10").write_bytes(b"wavdata")
-    chunk_dir = paths.audio_dir(sessions_root, "s1") / CHUNK_DIR_NAME
-    chunk_dir.mkdir(parents=True)
-    (chunk_dir / "10.part000.wav").write_bytes(b"duplicate")
-
-    archive = build_export(sessions_root, tmp_path / "exports", "s1")
-
-    with zipfile.ZipFile(archive) as zf:
-        names = zf.namelist()
-    assert not any(CHUNK_DIR_NAME in name for name in names)
-    assert any(name.endswith("10.wav") for name in names)

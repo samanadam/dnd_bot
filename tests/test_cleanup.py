@@ -53,29 +53,3 @@ def test_exports_are_untouched_by_cleanup(tmp_path: Path):
 
 def test_delete_is_a_noop_for_a_session_with_no_audio(tmp_path: Path):
     assert delete_session_audio(tmp_path, "missing") == 0
-
-
-def test_orphaned_chunk_directories_are_purged(tmp_path: Path):
-    """A crash mid-transcription leaves duplicate audio behind; it must not linger."""
-    from dnd_bot.chunking import CHUNK_DIR_NAME
-    from dnd_bot.cleanup import purge_orphaned_chunks
-
-    sessions_root = tmp_path / "sessions"
-    paths.ensure_session_dirs(sessions_root, "s1")
-    chunk_dir = paths.audio_dir(sessions_root, "s1") / CHUNK_DIR_NAME
-    chunk_dir.mkdir(parents=True)
-    (chunk_dir / "10.part000.wav").write_bytes(b"\x00" * 512)
-    track = paths.finalized_audio_path(sessions_root, "s1", "10")
-    track.write_bytes(b"\x00" * 128)
-
-    freed = purge_orphaned_chunks(sessions_root)
-
-    assert freed == 512
-    assert not chunk_dir.exists()
-    assert track.exists()  # the real track is untouched
-
-
-def test_purge_is_a_noop_without_chunks(tmp_path: Path):
-    from dnd_bot.cleanup import purge_orphaned_chunks
-
-    assert purge_orphaned_chunks(tmp_path / "nope") == 0

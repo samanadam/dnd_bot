@@ -60,10 +60,18 @@ jobs:
           # Imports every module and exits cleanly; catches a broken image
           # without needing a Discord token.
           docker run --rm dnd-session-bot:ci python -c "
-          import dnd_bot.bot, dnd_bot.recorder, dnd_bot.sinks, dnd_bot.chunking
-          import discord, faster_whisper, aiosqlite, numpy
-          print('image OK', discord.__version__, faster_whisper.__version__)
+          import dnd_bot.bot, dnd_bot.recorder, dnd_bot.sinks, dnd_bot.inbox, dnd_bot.outbox
+          import discord, aiosqlite
+          print('image OK', discord.__version__)
           "
-          docker run --rm dnd-session-bot:ci python -c "import nacl; print('voice deps OK')"
+          # Voice receive silently records nothing without these two.
+          docker run --rm dnd-session-bot:ci python -c "import nacl; print('PyNaCl OK')"
+          docker run --rm dnd-session-bot:ci python -c             "import discord.opus as o; assert o.is_loaded() or o._load_default(); print('opus OK')"
           docker run --rm dnd-session-bot:ci ffmpeg -version | head -1
           docker run --rm --entrypoint sh dnd-session-bot:ci -c 'test "$(id -u)" -ne 0 && echo "non-root OK"'
+
+      - name: The recorder must not carry a transcription stack
+        run: |
+          ! docker run --rm dnd-session-bot:ci python -c "import faster_whisper" 2>/dev/null
+          echo "no Whisper in the image, as intended"
+          docker image inspect dnd-session-bot:ci --format 'image size: {{.Size}} bytes'

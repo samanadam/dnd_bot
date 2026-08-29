@@ -16,12 +16,11 @@ from .backup import backup_database, prune_backups
 from .cleanup import run_cleanup
 from .config import Config, ConfigError, load_config
 from .db import Database
+from .inbox import InboxDelivery
 from .notify import DiscordNotifier
-from .queue_worker import TranscriptionWorker
 from .recorder import SessionManager
 from .recovery import scan_for_recoverable
 from .timeutil import to_iso, utcnow
-from .transcription import WhisperTranscriber
 
 log = logging.getLogger("dnd_bot")
 
@@ -49,19 +48,9 @@ class DnDBot(discord.Bot):
         super().__init__(intents=build_intents(), debug_guilds=[config.guild_id])
         self.config = config
         self.db = db
-        self.transcriber = WhisperTranscriber(
-            config.whisper_model,
-            device=config.whisper_device,
-            compute_type=config.whisper_compute_type,
-            download_root=os.environ.get("WHISPER_CACHE_DIR") or None,
-            beam_size=config.whisper_beam_size,
-            condition_on_previous_text=config.whisper_condition_on_previous_text,
-            vad_min_silence_ms=config.whisper_vad_min_silence_ms,
-            filter_hallucinations_enabled=config.filter_hallucinations,
-        )
         self.notifier = DiscordNotifier(self, config.admin_user_id)
         self.manager = SessionManager(self, db, config)
-        self.worker = TranscriptionWorker(db, config, self.transcriber, self.notifier)
+        self.deliveries = InboxDelivery(db, config, self.notifier)
         self._tasks: list[asyncio.Task] = []
         self._started = False
         self._shutting_down = False
@@ -83,21 +72,17 @@ class DnDBot(discord.Bot):
         # a container killed as "unhealthy" mid-download would never finish.
         self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
 
-        requeued = await self.db.reset_stuck_jobs()
-        if requeued:
-            log.warning("Re-queued %s job(s) left processing by a previous run", requeued)
         await self._report_recoverable()
 
-        if not await self._preload_model():
-            await self.close()
-            return
-
         self._tasks += [
-            asyncio.create_task(self.worker.run_forever(), name="transcription-worker"),
+            asyncio.create_task(self._inbox_loop(), name="inbox"),
             asyncio.create_task(self._cleanup_loop(), name="cleanup"),
             asyncio.create_task(self._backup_loop(), name="backup"),
         ]
-        log.info("Bot ready; %s pending transcription job(s)", await self.db.pending_count())
+        log.info(
+            "Bot ready; %s session(s) waiting on the transcriber",
+            await self.db.pending_count(),
+        )
 
     async def _report_recoverable(self) -> None:
         """A crash-orphaned session is worthless unless somebody is told about it."""
@@ -116,23 +101,6 @@ class DnDBot(discord.Bot):
         for row in recoverable[:1]:
             await self.notifier.notify_session(row, message)
         await self.notifier.send_dm(self.config.admin_user_id, message)
-
-    async def _preload_model(self) -> bool:
-        """Load Whisper once up front - never look healthy with broken transcription."""
-        try:
-            await asyncio.to_thread(self.transcriber.load)
-            return True
-        except Exception as exc:  # noqa: BLE001 - fatal, but must be reported first
-            log.critical(
-                "FATAL: could not load Whisper model %s: %s", self.config.whisper_model, exc
-            )
-            await self.notifier.send_dm(
-                self.config.admin_user_id,
-                f"The D&D recorder bot could not load the Whisper model "
-                f"`{self.config.whisper_model}`: `{exc}`. Transcription is unavailable, "
-                "so the bot is shutting down instead of running half-broken.",
-            )
-            return False
 
     async def on_voice_state_update(
         self,
@@ -160,7 +128,6 @@ class DnDBot(discord.Bot):
             return
         self._shutting_down = True
         log.info("Shutting down: finalizing active sessions")
-        self.worker.stop()
         with contextlib.suppress(Exception):
             results = await self.manager.shutdown_all()
             for result in results:
@@ -183,6 +150,15 @@ class DnDBot(discord.Bot):
             except OSError:
                 log.exception("Could not write heartbeat file")
             await asyncio.sleep(self.config.heartbeat_interval_seconds)
+
+    async def _inbox_loop(self) -> None:
+        """Post transcripts as the transcriber returns them."""
+        while True:
+            try:
+                await self.deliveries.run_once()
+            except Exception:  # noqa: BLE001 - the loop must outlive any single failure
+                log.exception("Inbox delivery pass failed")
+            await asyncio.sleep(self.config.inbox_poll_seconds)
 
     async def _cleanup_loop(self) -> None:
         while True:

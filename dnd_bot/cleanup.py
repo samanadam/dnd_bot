@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .chunking import CHUNK_DIR_NAME
 from .timeutil import from_iso
 
 log = logging.getLogger(__name__)
@@ -47,24 +46,6 @@ def delete_session_audio(sessions_root: Path, session_id: str) -> int:
     return freed
 
 
-def purge_orphaned_chunks(sessions_root: Path) -> int:
-    """Remove chunk directories left behind by a crash mid-transcription.
-
-    Chunks are duplicates of audio already on disk, so deleting them is always
-    safe - a re-run simply splits the track again.
-    """
-    if not sessions_root.is_dir():
-        return 0
-    freed = 0
-    for chunk_dir in sessions_root.glob(f"*/audio/{CHUNK_DIR_NAME}"):
-        if not chunk_dir.is_dir():
-            continue
-        freed += directory_size_bytes(chunk_dir)
-        shutil.rmtree(chunk_dir, ignore_errors=True)
-        log.info("Removed orphaned chunk directory %s", chunk_dir)
-    return freed
-
-
 def free_space_mb(path: Path) -> float:
     usage = shutil.disk_usage(str(path))
     return usage.free / 1_000_000
@@ -76,7 +57,7 @@ async def run_cleanup(db, config, notifier=None, now: datetime | None = None) ->
 
     now = now or utcnow()
     rows = await db.list_sessions_with_audio()
-    freed_total = purge_orphaned_chunks(config.sessions_dir)
+    freed_total = 0
     cleaned: list[str] = []
 
     for row in expired_sessions(rows, now):

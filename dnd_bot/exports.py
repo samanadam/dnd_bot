@@ -12,7 +12,6 @@ import zipfile
 from pathlib import Path
 
 from . import paths
-from .chunking import CHUNK_DIR_NAME
 
 log = logging.getLogger(__name__)
 
@@ -21,25 +20,40 @@ class ExportError(RuntimeError):
     """Raised when there is nothing to export."""
 
 
-def build_export(sessions_root: Path, exports_root: Path, session_id: str) -> Path:
-    session_dir = paths.session_dir(sessions_root, session_id)
-    if not session_dir.is_dir():
-        raise ExportError(f"No files on disk for session `{session_id}`.")
+def build_export(
+    sessions_root: Path,
+    exports_root: Path,
+    session_id: str,
+    outbox_root: Path | None = None,
+) -> Path:
+    """Bundle a session's transcript and whatever audio is still here.
 
-    # Skip temporary transcription chunks - they are duplicates of the tracks.
-    files = [
-        p
-        for p in session_dir.rglob("*")
-        if p.is_file() and CHUNK_DIR_NAME not in p.relative_to(session_dir).parts
-    ]
-    if not files:
+    Audio moves to the outbox when a session is staged, and disappears entirely
+    once the transcriber confirms it has a copy - so an export is transcript
+    plus audio before collection, and transcript alone afterwards.
+    """
+    session_dir = paths.session_dir(sessions_root, session_id)
+    sources: list[tuple[Path, Path]] = []
+    if session_dir.is_dir():
+        sources += [(p, session_dir) for p in session_dir.rglob("*") if p.is_file()]
+    if outbox_root is not None:
+        staged = Path(outbox_root) / session_id
+        if staged.is_dir():
+            sources += [(p, staged) for p in staged.rglob("*") if p.is_file()]
+
+    if not sources:
         raise ExportError(f"Session `{session_id}` has no files left to export.")
 
     exports_root.mkdir(parents=True, exist_ok=True)
     target = paths.export_path(exports_root, session_id)
+    seen: set[str] = set()
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(files):
-            archive.write(path, arcname=str(path.relative_to(session_dir)))
+        for path, root in sorted(sources):
+            arcname = str(path.relative_to(root))
+            if arcname in seen:
+                continue
+            seen.add(arcname)
+            archive.write(path, arcname=arcname)
     log.info("Exported session %s to %s (%.1f MB)", session_id, target, size_mb(target))
     return target
 

@@ -72,7 +72,7 @@ class SessionCog(commands.Cog):
             "Stop with `/session stop`."
         )
 
-    @session.command(name="stop", description="Stop your channel's session and queue transcription")
+    @session.command(name="stop", description="Stop your channel's session and hand it over")
     async def stop(self, ctx: discord.ApplicationContext) -> None:
         await ctx.defer()
         channel = _voice_channel_of(ctx)
@@ -84,21 +84,17 @@ class SessionCog(commands.Cog):
             await ctx.respond(f"No session is being recorded in **{channel.name}**.")
             return
 
-        window = (
-            f"{self.config.quiet_hours_start.strftime('%H:%M')}-"
-            f"{self.config.quiet_hours_end.strftime('%H:%M')} {self.config.timezone_name}"
-        )
-        deferred = (
-            f"Transcription is queued and runs during quiet hours ({window}), "
-            "not immediately - expect the transcript later, typically next morning."
-            if self.config.quiet_hours_enabled
-            else "Transcription is queued and will start shortly."
+        handover = (
+            "Audio is saved and waiting for the transcriber to collect it. "
+            "The transcript will be posted here once it comes back."
+            if result.enqueued
+            else "Nothing was handed over for transcription."
         )
         lines = [
             f"Stopped **{result.name}** (`{result.session_id}`).",
             f"Duration: {format_duration(result.duration_seconds)} | "
             f"Speakers: {len(result.speakers)}",
-            deferred if result.enqueued else "Nothing was queued for transcription.",
+            handover,
         ]
         if result.warnings:
             lines.append("Warnings: " + "; ".join(result.warnings))
@@ -142,11 +138,18 @@ class SessionCog(commands.Cog):
 
         active = self.manager.sessions_in_guild(ctx.guild_id)
         if not active:
-            pending = await self.db.pending_count()
-            await ctx.respond(
-                f"No active recording sessions. {pending} job(s) waiting in the "
-                "transcription queue."
-            )
+            waiting = await self.db.awaiting_transcription()
+            if not waiting:
+                await ctx.respond(
+                    "No active recording sessions, and nothing awaiting a transcript."
+                )
+                return
+            lines = [f"No active recording sessions. {len(waiting)} awaiting a transcript:"]
+            lines += [
+                f"- `{row['session_id']}` {row.get('name') or 'unnamed'} ({row['status']})"
+                for row in waiting[:10]
+            ]
+            await ctx.respond("\n".join(lines)[:1900])
             return
         lines = ["Active sessions:"]
         lines += [
@@ -189,7 +192,11 @@ class SessionCog(commands.Cog):
             return
         md_path = paths.transcript_md_path(self.config.sessions_dir, session_id)
         if not md_path.exists():
-            state = "still queued" if not row.get("transcribed") else "missing on disk"
+            state = (
+                "still waiting on the transcriber"
+                if not row.get("transcribed")
+                else "missing on disk"
+            )
             await ctx.respond(f"No transcript for `{session_id}` - it is {state}.")
             return
         try:
@@ -243,7 +250,11 @@ class SessionCog(commands.Cog):
         try:
             # Zipping hours of audio would block the event loop, so it runs in a thread.
             archive = await asyncio.to_thread(
-                build_export, self.config.sessions_dir, self.config.exports_dir, session_id
+                build_export,
+                self.config.sessions_dir,
+                self.config.exports_dir,
+                session_id,
+                self.config.outbox_dir,
             )
         except ExportError as exc:
             await ctx.respond(str(exc))

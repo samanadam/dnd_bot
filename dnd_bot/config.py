@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from datetime import time as dtime
+from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -37,32 +36,15 @@ def _get_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def parse_hhmm(value: str, name: str) -> dtime:
-    parts = value.strip().split(":")
-    if len(parts) != 2:
-        raise ConfigError(f"{name} must be HH:MM, got {value!r}")
-    try:
-        hour, minute = int(parts[0]), int(parts[1])
-        return dtime(hour=hour, minute=minute)
-    except ValueError as exc:
-        raise ConfigError(f"{name} must be HH:MM, got {value!r}") from exc
-
-
 @dataclass(frozen=True)
 class Config:
     discord_token: str
     guild_id: int
 
-    whisper_model: str = "medium"
-    whisper_device: str = "cpu"
-    whisper_compute_type: str = "int8"
+    # Transcription happens elsewhere. These two travel with the audio as
+    # metadata for whoever does it.
     transcribe_language: str = "tr"
-    whisper_beam_size: int = 5
-    whisper_condition_on_previous_text: bool = False
-    whisper_vad_min_silence_ms: int = 500
     whisper_prompt_extra: str = ""
-    transcribe_chunk_minutes: int = 10
-    filter_hallucinations: bool = True
 
     data_dir: Path = Path("/data")
     audio_format: str = "opus"
@@ -71,23 +53,18 @@ class Config:
     admin_user_id: int | None = None
     export_max_discord_upload_mb: int = 25
 
-    quiet_hours_enabled: bool = True
-    quiet_hours_start: dtime = field(default_factory=lambda: dtime(0, 0))
-    quiet_hours_end: dtime = field(default_factory=lambda: dtime(8, 0))
     timezone_name: str = "Europe/Istanbul"
 
     db_backup_keep_days: int = 14
 
-    # Handover to an external transcriber. With both enabled the audio is
-    # copied rather than moved, so the built-in worker still has it.
+    # Handover to an external transcriber.
     outbox_enabled: bool = True
-    transcribe_locally: bool = True
 
     # Tunables that are not part of the documented .env surface but are still
     # kept out of the call sites so tests can override them.
     flush_interval_seconds: float = 5.0
     alone_grace_seconds: int = 45
-    queue_poll_seconds: int = 180
+    inbox_poll_seconds: int = 60
     cleanup_interval_seconds: int = 6 * 3600
     heartbeat_interval_seconds: int = 30
     voice_reconnect_attempts: int = 3
@@ -195,27 +172,15 @@ def load_config() -> Config:
     return Config(
         discord_token=_get("DISCORD_TOKEN", required=True),
         guild_id=guild_id,
-        whisper_model=_get("WHISPER_MODEL", "medium"),
-        whisper_device=_get("WHISPER_DEVICE", "cpu"),
-        whisper_compute_type=_get("WHISPER_COMPUTE_TYPE", "int8"),
         transcribe_language=_get("TRANSCRIBE_LANGUAGE", "tr"),
-        whisper_beam_size=_get_int("WHISPER_BEAM_SIZE", 5),
-        whisper_condition_on_previous_text=_get_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", False),
-        whisper_vad_min_silence_ms=_get_int("WHISPER_VAD_MIN_SILENCE_MS", 500),
         whisper_prompt_extra=_get("WHISPER_PROMPT_EXTRA", ""),
-        transcribe_chunk_minutes=_get_int("TRANSCRIBE_CHUNK_MINUTES", 10),
-        filter_hallucinations=_get_bool("FILTER_HALLUCINATIONS", True),
         data_dir=Path(_get("DATA_DIR", "/data")),
         audio_format=audio_format,
         audio_retention_days=_get_int("AUDIO_RETENTION_DAYS", 7),
         disk_warning_threshold_mb=_get_int("DISK_WARNING_THRESHOLD_MB", 2000),
         admin_user_id=admin_user_id,
         export_max_discord_upload_mb=_get_int("EXPORT_MAX_DISCORD_UPLOAD_MB", 25),
-        quiet_hours_enabled=_get_bool("QUIET_HOURS_ENABLED", True),
-        quiet_hours_start=parse_hhmm(_get("QUIET_HOURS_START", "00:00"), "QUIET_HOURS_START"),
-        quiet_hours_end=parse_hhmm(_get("QUIET_HOURS_END", "08:00"), "QUIET_HOURS_END"),
         timezone_name=timezone_name,
         db_backup_keep_days=_get_int("DB_BACKUP_KEEP_DAYS", 14),
         outbox_enabled=_get_bool("OUTBOX_ENABLED", True),
-        transcribe_locally=_get_bool("TRANSCRIBE_LOCALLY", True),
     )

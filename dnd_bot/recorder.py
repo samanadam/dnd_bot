@@ -400,11 +400,13 @@ class SessionManager:
             enqueued = False
             if written:
                 row = await self.db.get_session(session.session_id)
-                warnings += await self._stage_for_transcription(row)
-                if self.config.transcribe_locally:
-                    enqueued = await self.db.enqueue(session.session_id) is not None
+                staging_warnings = await self._stage_for_transcription(row)
+                warnings += staging_warnings
+                if not staging_warnings:
+                    await self.db.mark_exported(session.session_id)
+                    enqueued = True
             else:
-                warnings.append("No audio was captured, so nothing was queued.")
+                warnings.append("No audio was captured, so there is nothing to transcribe.")
 
             log.info(
                 "Session %s stopped (reason=%s, speakers=%s, queued=%s)",
@@ -450,11 +452,10 @@ class SessionManager:
             return session.session_id
 
     async def _stage_for_transcription(self, row: dict[str, Any] | None) -> list[str]:
-        """Publish the finished session for whoever does the transcribing.
+        """Publish the finished session for the transcriber to collect.
 
-        With a local worker still enabled the audio is copied rather than moved,
-        so both paths can run side by side during the migration to a split
-        deployment.
+        The audio is moved, not copied: this host does not transcribe, and on a
+        small VPS a second copy is disk it does not have.
         """
         if row is None or not self.config.outbox_enabled:
             return []
@@ -467,7 +468,7 @@ class SessionManager:
                 audio_format=self.config.audio_format,
                 timezone_name=self.config.timezone_name,
                 prompt_extra=self.config.whisper_prompt_extra,
-                move=not self.config.transcribe_locally,
+                move=True,
             )
         except Exception as exc:  # noqa: BLE001 - reported, never fatal to the stop path
             log.exception("Could not stage session %s for the transcriber", row.get("id"))
@@ -515,12 +516,11 @@ class SessionManager:
         end_time = row.get("end_time") or to_iso(utcnow())
         await self.db.update_session(session_id, completed=1, transcribed=0, end_time=end_time)
         row = await self.db.get_session(session_id) or row
-        warnings += await self._stage_for_transcription(row)
-        enqueued = (
-            await self.db.enqueue(session_id) is not None
-            if self.config.transcribe_locally
-            else False
-        )
+        staging_warnings = await self._stage_for_transcription(row)
+        warnings += staging_warnings
+        enqueued = not staging_warnings
+        if enqueued:
+            await self.db.mark_exported(session_id)
         labels: dict[str, str] = json.loads(row.get("participants_json") or "{}")
         duration = 0.0
         start = row.get("start_time")
