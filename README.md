@@ -56,6 +56,24 @@ it is slow, and a self-hosted box is typically shared with other services — so
 the heavy step is pushed into the night. Expect a transcript the next morning, not right after
 `/session stop`.
 
+### Recording and transcription can run on different machines
+
+The bot writes each finished session into `DATA_DIR/outbox/<id>/` as audio plus
+a `metadata.json` that carries everything needed to transcribe it — speaker
+labels, per-speaker offsets, timezone, language, prompt vocabulary. A `READY`
+marker is written last, so a directory that is still being copied is invisible
+to whoever collects it.
+
+That means transcription does not have to happen here. Set
+`TRANSCRIBE_LOCALLY=false` and this host becomes a pure recorder: light enough
+for the smallest VPS, and the audio is moved rather than copied into the outbox.
+Useful when Discord is unreachable from the machine that has the CPU — or simply
+when you would rather not run Whisper on the same box.
+
+The exchange format is defined in `dnd_bot/contract.py`, including a schema
+version so that two halves at different versions fail loudly instead of
+misreading each other.
+
 ### On recording two channels at once
 
 All session state is keyed by `(guild_id, channel_id)` — there is no global
@@ -143,7 +161,9 @@ environment; nothing is hardcoded.
 | `FILTER_HALLUCINATIONS` | `true` | Strip subtitle boilerplate and stuck repeats. |
 | `TRANSCRIBE_CHUNK_MINUTES` | `10` | Memory ceiling for transcription; see below. |
 | `DATA_DIR` | `/data` | Everything persistent lives here. |
-| `AUDIO_FORMAT` | `wav` | Or `mp3` (smaller, transcoded with ffmpeg). |
+| `AUDIO_FORMAT` | `opus` | ~32× smaller than `wav`, no measured accuracy cost. Or `wav`/`mp3`. |
+| `OUTBOX_ENABLED` | `true` | Stage finished sessions for an external transcriber. |
+| `TRANSCRIBE_LOCALLY` | `true` | Run the built-in Whisper worker on this host. |
 | `AUDIO_RETENTION_DAYS` | `7` | Days after transcription before raw audio is deleted. |
 | `DISK_WARNING_THRESHOLD_MB` | `2000` | Below this, a warning is sent to the channel and by DM. |
 | `ADMIN_USER_ID` | — | Fallback DM recipient. |
@@ -228,19 +248,22 @@ Beyond that:
 
 ### Sizing the data directory first
 
-Discord delivers 48 kHz stereo audio, and every speaker gets their own track, so
-raw session audio is bulky:
+Discord delivers 48 kHz stereo audio and every speaker gets their own track, so
+the raw capture is bulky — but it is encoded to Opus at the end of the session,
+which shrinks it about 32×:
 
 | session length | 3 players | 5 players | 7 players |
 | --- | --- | --- | --- |
-| 2 h | 4.1 GB | 6.9 GB | 9.7 GB |
-| 3 h | 6.2 GB | 10.4 GB | 14.5 GB |
-| 4 h | 8.3 GB | 13.8 GB | 19.4 GB |
+| 2 h | 130 MB | 216 MB | 302 MB |
+| 3 h | 194 MB | 324 MB | 454 MB |
+| 4 h | 259 MB | 432 MB | 605 MB |
 
-That is ~0.7 GB per hour **per speaker**, kept for `AUDIO_RETENTION_DAYS` (7 by
-default) after transcription. Transcripts are tiny and kept forever; it is the
-audio that needs room. Point `DATA_HOST_DIR` at a disk that has it — the code
-can live anywhere, the data should not follow it by accident.
+With `AUDIO_FORMAT=wav` those same figures are in gigabytes (a 4 h session with
+5 players is ~14 GB), so keep the default unless you have a reason not to.
+
+Note that **the raw PCM capture is still full-size while the session runs** —
+budget ~0.7 GB per speaker-hour of free space during play, released when the
+session is finalized. Transcripts are tiny and kept forever.
 
 ### First run
 
@@ -423,6 +446,11 @@ it, look for `Recoverable session <id>` in the logs, and run
         <user_id>.wav          # finalized at stop/recover
       transcript.md
       transcript.json
+  outbox/<session_id>/         # staged for an external transcriber
+    metadata.json              #   everything needed to transcribe, no DB required
+    <user_id>.opus
+    READY                      #   written last; nothing acts before it exists
+  inbox/<session_id>/          # transcripts sent back by an external transcriber
   exports/<session_id>.zip     # from /session export; never auto-deleted
   backups/bot-<date>.db        # nightly database copies
   bot.db                       # SQLite metadata (WAL mode)

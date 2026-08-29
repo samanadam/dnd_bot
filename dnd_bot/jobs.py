@@ -14,7 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from . import paths
-from .chunking import CHUNK_DIR_NAME, cleanup_chunks, split_wav
+from .chunking import CHUNK_DIR_NAME, cleanup_chunks, split_audio
 from .timeutil import from_iso, utcnow
 from .transcription import (
     RawSegment,
@@ -47,10 +47,22 @@ class JobResult:
     warnings: list[str] = field(default_factory=list)
 
 
+KNOWN_AUDIO_FORMATS = ("opus", "wav", "mp3")
+
+
 def audio_files_for(session_dir_audio: Path, audio_format: str) -> list[Path]:
+    """Speaker tracks, preferring the configured format.
+
+    Falls back to any other known format so that sessions recorded before
+    AUDIO_FORMAT was changed are still transcribable.
+    """
     if not session_dir_audio.is_dir():
         return []
-    return sorted(p for p in session_dir_audio.glob(f"*.{audio_format}") if p.is_file())
+    for candidate in (audio_format, *KNOWN_AUDIO_FORMATS):
+        found = sorted(p for p in session_dir_audio.glob(f"*.{candidate}") if p.is_file())
+        if found:
+            return found
+    return []
 
 
 def session_duration_seconds(session: dict[str, Any]) -> float:
@@ -75,11 +87,11 @@ def transcribe_one(
     need several GB before decoding even starts.
     """
     try:
-        chunks = split_wav(path, path.parent / CHUNK_DIR_NAME, chunk_seconds)
-    except Exception as exc:  # noqa: BLE001 - e.g. AUDIO_FORMAT=mp3, which `wave` cannot read
+        chunks = split_audio(path, path.parent / CHUNK_DIR_NAME, chunk_seconds)
+    except Exception as exc:  # noqa: BLE001 - unreadable input, or no ffmpeg
         log.warning(
-            "Could not split %s (%s); transcribing it whole. Long sessions in this "
-            "format may use a lot of memory.",
+            "Could not split %s (%s); transcribing it whole. A long track handled "
+            "this way may use a lot of memory.",
             path.name,
             exc,
         )

@@ -65,7 +65,7 @@ class Config:
     filter_hallucinations: bool = True
 
     data_dir: Path = Path("/data")
-    audio_format: str = "wav"
+    audio_format: str = "opus"
     audio_retention_days: int = 7
     disk_warning_threshold_mb: int = 2000
     admin_user_id: int | None = None
@@ -77,6 +77,11 @@ class Config:
     timezone_name: str = "Europe/Istanbul"
 
     db_backup_keep_days: int = 14
+
+    # Handover to an external transcriber. With both enabled the audio is
+    # copied rather than moved, so the built-in worker still has it.
+    outbox_enabled: bool = True
+    transcribe_locally: bool = True
 
     # Tunables that are not part of the documented .env surface but are still
     # kept out of the call sites so tests can override them.
@@ -104,6 +109,16 @@ class Config:
         return self.data_dir / "exports"
 
     @property
+    def outbox_dir(self) -> Path:
+        """Sessions staged for the transcriber to collect."""
+        return self.data_dir / "outbox"
+
+    @property
+    def inbox_dir(self) -> Path:
+        """Transcripts the transcriber has sent back."""
+        return self.data_dir / "inbox"
+
+    @property
     def backups_dir(self) -> Path:
         return self.data_dir / "backups"
 
@@ -119,7 +134,14 @@ class Config:
         user, so the first write fails. A raw PermissionError traceback in a
         crash-looping container is a miserable way to learn that.
         """
-        for path in (self.data_dir, self.sessions_dir, self.exports_dir, self.backups_dir):
+        for path in (
+            self.data_dir,
+            self.sessions_dir,
+            self.exports_dir,
+            self.backups_dir,
+            self.outbox_dir,
+            self.inbox_dir,
+        ):
             try:
                 path.mkdir(parents=True, exist_ok=True)
             except PermissionError as exc:
@@ -160,9 +182,9 @@ def load_config() -> Config:
     admin_raw = os.environ.get("ADMIN_USER_ID", "").strip()
     admin_user_id = int(admin_raw) if admin_raw else None
 
-    audio_format = _get("AUDIO_FORMAT", "wav").lower()
-    if audio_format not in {"wav", "mp3"}:
-        raise ConfigError(f"AUDIO_FORMAT must be 'wav' or 'mp3', got {audio_format!r}")
+    audio_format = _get("AUDIO_FORMAT", "opus").lower()
+    if audio_format not in {"opus", "wav", "mp3"}:
+        raise ConfigError(f"AUDIO_FORMAT must be 'opus', 'wav' or 'mp3', got {audio_format!r}")
 
     timezone_name = _get("TIMEZONE", "Europe/Istanbul")
     try:
@@ -194,4 +216,6 @@ def load_config() -> Config:
         quiet_hours_end=parse_hhmm(_get("QUIET_HOURS_END", "08:00"), "QUIET_HOURS_END"),
         timezone_name=timezone_name,
         db_backup_keep_days=_get_int("DB_BACKUP_KEEP_DAYS", 14),
+        outbox_enabled=_get_bool("OUTBOX_ENABLED", True),
+        transcribe_locally=_get_bool("TRANSCRIBE_LOCALLY", True),
     )

@@ -50,6 +50,41 @@ def pcm_to_wav(pcm_path: Path, wav_path: Path) -> Path:
     return wav_path
 
 
+def wav_to_opus(wav_path: Path, opus_path: Path, bitrate_kbps: int = 48) -> Path:
+    """Transcode to Opus, ~50x smaller than the raw capture.
+
+    Discord already delivers Opus and py-cord decodes it to PCM, so this mostly
+    undoes an expansion we caused ourselves. Mono at 48 kbps is generous for
+    speech and is what makes shipping a session over a home connection - and
+    storing it on a small VPS - practical at all.
+    """
+    wav_path = Path(wav_path)
+    opus_path = Path(opus_path)
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(wav_path),
+        "-ac",
+        "1",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        f"{bitrate_kbps}k",
+        # Tuned for speech rather than music.
+        "-application",
+        "voip",
+        str(opus_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise AudioError(f"ffmpeg failed encoding {wav_path.name} to Opus: {result.stderr.strip()}")
+    return opus_path
+
+
 def wav_to_mp3(wav_path: Path, mp3_path: Path) -> Path:
     """Transcode with ffmpeg. Used only when AUDIO_FORMAT=mp3."""
     wav_path = Path(wav_path)
@@ -74,15 +109,22 @@ def wav_to_mp3(wav_path: Path, mp3_path: Path) -> Path:
     return mp3_path
 
 
-def finalize_capture(pcm_path: Path, out_path: Path, audio_format: str = "wav") -> Path:
+ENCODERS = {"mp3": wav_to_mp3, "opus": wav_to_opus}
+
+
+def finalize_capture(pcm_path: Path, out_path: Path, audio_format: str = "opus") -> Path:
     """Turn one user's raw PCM into the configured deliverable format."""
     if audio_format == "wav":
         return pcm_to_wav(pcm_path, out_path)
 
-    intermediate = out_path.with_suffix(".wav")
+    encoder = ENCODERS.get(audio_format)
+    if encoder is None:
+        raise AudioError(f"Unsupported audio format {audio_format!r}")
+
+    intermediate = out_path.with_suffix(".intermediate.wav")
     pcm_to_wav(pcm_path, intermediate)
     try:
-        wav_to_mp3(intermediate, out_path)
+        encoder(intermediate, out_path)
     finally:
         intermediate.unlink(missing_ok=True)
     return out_path

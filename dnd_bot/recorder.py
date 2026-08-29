@@ -23,6 +23,7 @@ from .config import Config
 from .db import Database
 from .finalize import finalize_session_audio
 from .labels import resolve_label
+from .outbox import publish
 from .sinks import DiskSink
 from .timeutil import to_iso, utcnow
 
@@ -398,7 +399,10 @@ class SessionManager:
             )
             enqueued = False
             if written:
-                enqueued = await self.db.enqueue(session.session_id) is not None
+                row = await self.db.get_session(session.session_id)
+                warnings += await self._stage_for_transcription(row)
+                if self.config.transcribe_locally:
+                    enqueued = await self.db.enqueue(session.session_id) is not None
             else:
                 warnings.append("No audio was captured, so nothing was queued.")
 
@@ -445,6 +449,31 @@ class SessionManager:
             log.info("Session %s cancelled and discarded", session.session_id)
             return session.session_id
 
+    async def _stage_for_transcription(self, row: dict[str, Any] | None) -> list[str]:
+        """Publish the finished session for whoever does the transcribing.
+
+        With a local worker still enabled the audio is copied rather than moved,
+        so both paths can run side by side during the migration to a split
+        deployment.
+        """
+        if row is None or not self.config.outbox_enabled:
+            return []
+        try:
+            await asyncio.to_thread(
+                publish,
+                row,
+                sessions_root=self.config.sessions_dir,
+                outbox_root=self.config.outbox_dir,
+                audio_format=self.config.audio_format,
+                timezone_name=self.config.timezone_name,
+                prompt_extra=self.config.whisper_prompt_extra,
+                move=not self.config.transcribe_locally,
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal to the stop path
+            log.exception("Could not stage session %s for the transcriber", row.get("id"))
+            return [f"Could not stage this session for the transcriber: {exc}"]
+        return []
+
     async def _teardown_voice(self, session: ActiveSession) -> None:
         with contextlib.suppress(Exception):
             if session.voice_client.recording:
@@ -485,7 +514,13 @@ class SessionManager:
 
         end_time = row.get("end_time") or to_iso(utcnow())
         await self.db.update_session(session_id, completed=1, transcribed=0, end_time=end_time)
-        enqueued = await self.db.enqueue(session_id) is not None
+        row = await self.db.get_session(session_id) or row
+        warnings += await self._stage_for_transcription(row)
+        enqueued = (
+            await self.db.enqueue(session_id) is not None
+            if self.config.transcribe_locally
+            else False
+        )
         labels: dict[str, str] = json.loads(row.get("participants_json") or "{}")
         duration = 0.0
         start = row.get("start_time")
