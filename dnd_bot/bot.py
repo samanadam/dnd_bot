@@ -16,11 +16,13 @@ from .backup import backup_database, prune_backups
 from .cleanup import run_cleanup
 from .config import Config, ConfigError, load_config
 from .db import Database
-from .inbox import InboxDelivery
+from .inbox import InboxDelivery, InboxFetcher
 from .notify import DiscordNotifier
+from .r2 import R2Store
 from .recorder import SessionManager
 from .recovery import scan_for_recoverable
 from .timeutil import to_iso, utcnow
+from .uploader import OutboxUploader
 
 log = logging.getLogger("dnd_bot")
 
@@ -51,6 +53,14 @@ class DnDBot(discord.Bot):
         self.notifier = DiscordNotifier(self, config.admin_user_id)
         self.manager = SessionManager(self, db, config)
         self.deliveries = InboxDelivery(db, config, self.notifier)
+
+        # With R2 the handover is object storage rather than a shared
+        # filesystem; the local outbox becomes a staging area an uploader
+        # drains. Both are None on the local backend, and every use is guarded.
+        self.store = R2Store.from_config(config) if config.uses_r2 else None
+        self.uploader = OutboxUploader(self.store, config) if self.store else None
+        self.fetcher = InboxFetcher(self.store, config) if self.store else None
+
         self._tasks: list[asyncio.Task] = []
         self._started = False
         self._shutting_down = False
@@ -79,8 +89,11 @@ class DnDBot(discord.Bot):
             asyncio.create_task(self._cleanup_loop(), name="cleanup"),
             asyncio.create_task(self._backup_loop(), name="backup"),
         ]
+        if self.uploader is not None:
+            self._tasks.append(asyncio.create_task(self._upload_loop(), name="upload"))
         log.info(
-            "Bot ready; %s session(s) waiting on the transcriber",
+            "Bot ready; handover via %s; %s session(s) waiting on the transcriber",
+            "Cloudflare R2" if self.config.uses_r2 else "the local filesystem",
             await self.db.pending_count(),
         )
 
@@ -151,10 +164,23 @@ class DnDBot(discord.Bot):
                 log.exception("Could not write heartbeat file")
             await asyncio.sleep(self.config.heartbeat_interval_seconds)
 
+    async def _upload_loop(self) -> None:
+        """Drain the local staging area into R2, freeing the disk it used."""
+        while True:
+            try:
+                await self.uploader.run_once()
+            except Exception:  # noqa: BLE001 - the loop must outlive any single failure
+                log.exception("Upload pass failed")
+            await asyncio.sleep(self.config.upload_interval_seconds)
+
     async def _inbox_loop(self) -> None:
         """Post transcripts as the transcriber returns them."""
         while True:
             try:
+                if self.fetcher is not None:
+                    # Downloads land in the local inbox, so delivery below is
+                    # identical whichever backend brought the transcript here.
+                    await self.fetcher.run_once()
                 await self.deliveries.run_once()
             except Exception:  # noqa: BLE001 - the loop must outlive any single failure
                 log.exception("Inbox delivery pass failed")

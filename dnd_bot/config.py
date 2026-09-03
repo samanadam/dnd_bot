@@ -51,6 +51,9 @@ class Config:
     audio_retention_days: int = 7
     disk_warning_threshold_mb: int = 2000
     admin_user_id: int | None = None
+    # Role allowed to run the commands that reach past the current session
+    # (/session export, transcript, recover). Manage Guild works regardless.
+    session_admin_role_id: int | None = None
     export_max_discord_upload_mb: int = 25
 
     timezone_name: str = "Europe/Istanbul"
@@ -59,6 +62,15 @@ class Config:
 
     # Handover to an external transcriber.
     outbox_enabled: bool = True
+
+    # Where the handover happens: a shared filesystem ("local", the transcriber
+    # pulls over SSH) or Cloudflare R2 ("r2", both halves talk outbound only).
+    storage_backend: str = "local"
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket: str = ""
+    upload_interval_seconds: int = 120
 
     # Tunables that are not part of the documented .env surface but are still
     # kept out of the call sites so tests can override them.
@@ -102,6 +114,10 @@ class Config:
     @property
     def heartbeat_path(self) -> Path:
         return self.data_dir / "heartbeat"
+
+    @property
+    def uses_r2(self) -> bool:
+        return self.storage_backend == "r2"
 
     def ensure_dirs(self) -> None:
         """Create the data tree, with an actionable error if we cannot.
@@ -159,6 +175,9 @@ def load_config() -> Config:
     admin_raw = os.environ.get("ADMIN_USER_ID", "").strip()
     admin_user_id = int(admin_raw) if admin_raw else None
 
+    role_raw = os.environ.get("SESSION_ADMIN_ROLE_ID", "").strip()
+    session_admin_role_id = int(role_raw) if role_raw else None
+
     audio_format = _get("AUDIO_FORMAT", "opus").lower()
     if audio_format not in {"opus", "wav", "mp3"}:
         raise ConfigError(f"AUDIO_FORMAT must be 'opus', 'wav' or 'mp3', got {audio_format!r}")
@@ -168,6 +187,26 @@ def load_config() -> Config:
         ZoneInfo(timezone_name)
     except Exception as exc:  # noqa: BLE001 - surfaced as a config error
         raise ConfigError(f"Unknown TIMEZONE {timezone_name!r}") from exc
+
+    storage_backend = _get("STORAGE_BACKEND", "local").lower()
+    if storage_backend not in {"local", "r2"}:
+        raise ConfigError(f"STORAGE_BACKEND must be 'local' or 'r2', got {storage_backend!r}")
+    r2_settings = {
+        "R2_ACCOUNT_ID": _get("R2_ACCOUNT_ID"),
+        "R2_ACCESS_KEY_ID": _get("R2_ACCESS_KEY_ID"),
+        "R2_SECRET_ACCESS_KEY": _get("R2_SECRET_ACCESS_KEY"),
+        "R2_BUCKET": _get("R2_BUCKET"),
+    }
+    if storage_backend == "r2":
+        # Failing here beats discovering it at the end of a four-hour session,
+        # when the upload is the only thing standing between the audio and the
+        # transcriber.
+        missing = sorted(name for name, value in r2_settings.items() if not value)
+        if missing:
+            raise ConfigError(
+                f"STORAGE_BACKEND=r2 needs {', '.join(missing)}. "
+                "Create an R2 API token with Object Read & Write on your bucket."
+            )
 
     return Config(
         discord_token=_get("DISCORD_TOKEN", required=True),
@@ -179,8 +218,15 @@ def load_config() -> Config:
         audio_retention_days=_get_int("AUDIO_RETENTION_DAYS", 7),
         disk_warning_threshold_mb=_get_int("DISK_WARNING_THRESHOLD_MB", 2000),
         admin_user_id=admin_user_id,
+        session_admin_role_id=session_admin_role_id,
         export_max_discord_upload_mb=_get_int("EXPORT_MAX_DISCORD_UPLOAD_MB", 25),
         timezone_name=timezone_name,
         db_backup_keep_days=_get_int("DB_BACKUP_KEEP_DAYS", 14),
         outbox_enabled=_get_bool("OUTBOX_ENABLED", True),
+        storage_backend=storage_backend,
+        r2_account_id=r2_settings["R2_ACCOUNT_ID"],
+        r2_access_key_id=r2_settings["R2_ACCESS_KEY_ID"],
+        r2_secret_access_key=r2_settings["R2_SECRET_ACCESS_KEY"],
+        r2_bucket=r2_settings["R2_BUCKET"],
+        upload_interval_seconds=_get_int("UPLOAD_INTERVAL_SECONDS", 120),
     )

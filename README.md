@@ -18,7 +18,8 @@ is blocked, while your recordings are transcribed at home.
 
 - **Recording:** per-speaker, written to disk incrementally as packets arrive.
 - **Handover:** finished sessions are encoded to Opus and staged in an outbox
-  with everything needed to transcribe them.
+  with everything needed to transcribe them — over a shared filesystem, or
+  through a Cloudflare R2 bucket both halves reach outbound.
 - **State:** SQLite (WAL) for metadata, filesystem for audio.
 - **Bot UI language:** English. Transcripts are Turkish by default.
 
@@ -49,6 +50,8 @@ is blocked, while your recordings are transcribed at home.
   (during play)     packets are appended and fsync-ed every ~5s
 /session stop    -> PCM is encoded to Opus and moved to /data/outbox/<id>/
                     with metadata.json, then marked READY
+  (with R2)      -> the staged session is uploaded to the bucket and the local
+                    copy is released once R2 confirms it
   (whenever)     -> the transcriber collects it, transcribes it elsewhere,
                     and writes /data/inbox/<id>/ + DONE
                  -> this bot posts transcript.md to the channel the session
@@ -72,7 +75,11 @@ instance with its own bot token and its own `DATA_DIR`.
 
 ## Commands
 
-Anyone in the relevant voice channel can run these — there is no role gating.
+Starting, stopping and cancelling are open to anyone in the voice channel —
+the people in the channel are the people being recorded. The three commands
+marked 🔒 reach *backwards* into past sessions and publish their words or raw
+audio into whatever channel the caller is in, so they are restricted to
+members with **Manage Guild** or the role named by `SESSION_ADMIN_ROLE_ID`.
 
 | Command | What it does |
 | --- | --- |
@@ -81,9 +88,9 @@ Anyone in the relevant voice channel can run these — there is no role gating.
 | `/session status` | The active session, or what is waiting for a transcript. |
 | `/session cancel` | Stops and **discards** the session, deleting its audio. |
 | `/session list` | Recent completed sessions with id, name, channel, date, duration. |
-| `/session transcript <id>` | Re-posts a past session's transcript. |
-| `/session recover <id>` | Finalizes and stages a session left open by a crash. |
-| `/session export <id>` | Zips a session's transcript and any audio still here. |
+| `/session transcript <id>` 🔒 | Re-posts a past session's transcript. |
+| `/session recover <id>` 🔒 | Finalizes and stages a session left open by a crash. |
+| `/session export <id>` 🔒 | Zips a session's transcript and any audio still here. |
 | `/character set <user> <name>` | Maps a Discord user to a character name. |
 | `/character clear <user>` | Removes a mapping. |
 | `/character list` | Shows all mappings. |
@@ -133,7 +140,14 @@ Copy `.env.example` to `.env`. Every setting is read from the environment.
 | `AUDIO_FORMAT` | `opus` | ~32× smaller than `wav`, no measured accuracy cost. |
 | `AUDIO_RETENTION_DAYS` | `7` | Days before audio still here is deleted. |
 | `DISK_WARNING_THRESHOLD_MB` | `5000` | Warn below this much free space. |
-| `ADMIN_USER_ID` | — | Fallback DM recipient for warnings and fatal errors. |
+| `ADMIN_USER_ID` | — | Fallback DM recipient for warnings and fatal errors. Always privileged. |
+| `SESSION_ADMIN_ROLE_ID` | — | Role allowed to run the 🔒 commands. Manage Guild works regardless. |
+| `STORAGE_BACKEND` | `local` | `local` (transcriber pulls over SSH) or `r2` (Cloudflare R2). |
+| `R2_ACCOUNT_ID` | — | Required when `STORAGE_BACKEND=r2`. From the R2 overview page. |
+| `R2_ACCESS_KEY_ID` | — | Required when `STORAGE_BACKEND=r2`. |
+| `R2_SECRET_ACCESS_KEY` | — | Required when `STORAGE_BACKEND=r2`. |
+| `R2_BUCKET` | — | Required when `STORAGE_BACKEND=r2`. The transcriber uses the same bucket. |
+| `UPLOAD_INTERVAL_SECONDS` | `120` | How often staged sessions are pushed to R2. |
 | `EXPORT_MAX_DISCORD_UPLOAD_MB` | `25` | Larger exports report a path instead of uploading. |
 | `TIMEZONE` | `Europe/Istanbul` | Transcript timestamps and the backup schedule. |
 | `DB_BACKUP_KEEP_DAYS` | `14` | Daily `bot.db` copies kept in `/data/backups`. |
@@ -196,12 +210,47 @@ What the compose file does for you:
 
 ### Connecting the transcriber
 
-The transcriber pulls over SSH, so it needs a user on this host that can read
-`<DATA_HOST_DIR>/outbox` and write `<DATA_HOST_DIR>/inbox`. The simplest
-arrangement is to add your login user to the group owning that directory, then
-add the transcriber machine's public key to `~/.ssh/authorized_keys`.
+Two ways, chosen with `STORAGE_BACKEND`. Nothing is exposed to the internet
+either way.
 
-Nothing needs to be exposed to the internet: the transcriber always initiates.
+**Cloudflare R2 (`STORAGE_BACKEND=r2`)** — recommended. Neither machine needs to
+reach the other, so there is no SSH account on this host and nothing forwarded
+at home. R2 charges no egress, which is what makes pulling gigabytes of audio
+down to a domestic connection free.
+
+1. Cloudflare dashboard → **R2** → **Create bucket**. Any name; a private
+   bucket, no public access.
+2. **R2 → Manage API Tokens → Create API Token**, permission **Object Read &
+   Write**, scoped to that one bucket. Copy the Access Key ID and Secret — the
+   secret is shown once.
+3. Take the **Account ID** from the R2 overview page (it is not on the token
+   page).
+4. Put all four into `.env` here *and* the same four into the transcriber's
+   `.env`, with `STORAGE_BACKEND=r2` on both. Same bucket, both ends.
+
+Verify the credentials before your first real session — this writes, lists and
+deletes one small object:
+
+```bash
+docker compose run --rm dnd-bot python scripts/check_r2.py
+```
+
+Finished sessions are uploaded by a background pass every
+`UPLOAD_INTERVAL_SECONDS`; the local staging copy is deleted only once R2
+confirms it holds the complete session, so a failed upload costs a delay and
+never audio. Sessions staged while the network is down are uploaded on the next
+pass, or on the next start.
+
+R2 also becomes the long-term audio archive: the transcriber leaves collected
+sessions in place rather than deleting them (`R2_KEEP_AUDIO=false` on that side
+reverses this). At Opus sizes a weekly game costs a few cents a month. Set a
+bucket lifecycle rule if you would rather they expired.
+
+**SSH (`STORAGE_BACKEND=local`)** — the transcriber pulls over SSH, so it needs
+a user on this host that can read `<DATA_HOST_DIR>/outbox` and write
+`<DATA_HOST_DIR>/inbox`. The simplest arrangement is to add your login user to
+the group owning that directory, then add the transcriber machine's public key
+to `~/.ssh/authorized_keys`. The transcriber always initiates.
 
 ### Upgrading
 
@@ -262,6 +311,7 @@ If the bot crashes mid-session nothing is lost: restart it, look for
     <user_id>.opus
     READY                      #   written last; nothing acts before it exists
   inbox/<session_id>/          # transcripts sent back; consumed and removed
+  .inbox-staging/              # R2 downloads land here first, then move in
   exports/<session_id>.zip     # from /session export; never auto-deleted
   backups/bot-<date>.db        # nightly database copies
   bot.db                       # SQLite metadata (WAL mode)
@@ -282,6 +332,12 @@ being copied is invisible to the other side and an interrupted transfer is
 harmless rather than a corrupt half-session.
 
 **Change `contract.py` in both repositories in the same commit.**
+
+R2 does not change any of this. Object keys mirror the directory layout
+(`outbox/<session_id>/READY`, `inbox/<session_id>/DONE`) and the marker object
+is still written last, so a session mid-upload stays invisible to the other side
+exactly as a directory mid-copy does. That is why moving to object storage
+needed no edit to `contract.py` at all — only a new transport either end.
 
 ## Retention, exports and backups
 
@@ -334,8 +390,11 @@ tests, and builds the image on every push.
   length of the gap.
 - Transcription depends on someone running the transcriber. Nothing here will
   chase them.
-- Single guild, no web UI, no live transcription, no consent-announcement flow,
-  no role-based access control — all deliberate non-goals.
+- A session finished while the network is down waits on disk until the next
+  upload pass. It is not lost, but it is not in R2 either, so budget the disk.
+- Single guild, no web UI, no live transcription, and no consent-announcement
+  flow — deliberate non-goals. Access control now covers only the commands that
+  reach into past sessions; starting a recording stays open by design.
 
 ## License
 

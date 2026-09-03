@@ -1,8 +1,15 @@
 """/session commands.
 
-Access control is intentionally open: anyone currently in the voice channel can
-start, stop or cancel that channel's session. All bot-facing text is English,
-independent of the transcript language.
+Recording a channel stays open: anyone currently in the voice channel can start,
+stop or cancel that channel's session, because the people in the channel are the
+people being recorded.
+
+Reaching backwards is gated. `/session transcript`, `/session export` and
+`/session recover` act on sessions the caller may have had nothing to do with,
+and the first two publish that session's words - or its raw audio - into
+whatever channel the caller happens to be in. See `access.py`.
+
+All bot-facing text is English, independent of the transcript language.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ import discord
 from discord.ext import commands
 
 from .. import paths
+from ..access import require_privileged
 from ..exports import ExportError, build_export, fits_discord_upload, size_mb
 from ..recorder import RecordingError
 from ..timeutil import format_duration, from_iso, to_local, utcnow
@@ -186,6 +194,8 @@ class SessionCog(commands.Cog):
         session_id: discord.Option(str, "Session id from /session list"),  # noqa: F821
     ) -> None:
         await ctx.defer()
+        if not await require_privileged(ctx, self.config):
+            return
         row = await self.db.get_session(session_id)
         if row is None:
             await ctx.respond(f"No session found with id `{session_id}`.")
@@ -219,6 +229,8 @@ class SessionCog(commands.Cog):
         session_id: discord.Option(str, "Session id reported at startup"),  # noqa: F821
     ) -> None:
         await ctx.defer()
+        if not await require_privileged(ctx, self.config):
+            return
         try:
             result = await self.manager.recover(session_id)
         except RecordingError as exc:
@@ -244,6 +256,8 @@ class SessionCog(commands.Cog):
         session_id: discord.Option(str, "Session id from /session list"),  # noqa: F821
     ) -> None:
         await ctx.defer()
+        if not await require_privileged(ctx, self.config):
+            return
         if await self.db.get_session(session_id) is None:
             await ctx.respond(f"No session found with id `{session_id}`.")
             return

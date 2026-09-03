@@ -11,6 +11,7 @@ split it does not have the code either.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from typing import Any
 
 from . import outbox, paths
 from .contract import DONE_MARKER, TRANSCRIPT_JSON, TRANSCRIPT_MD, done_sessions
+from .r2 import INBOX_PREFIX, R2Store
 from .timeutil import to_iso, utcnow
 
 log = logging.getLogger(__name__)
@@ -75,6 +77,69 @@ def summarize(transcript_md: Path) -> str:
         if line.startswith("## Transcript"):
             break
     return " | ".join(lines)
+
+
+class InboxFetcher:
+    """Brings transcripts down from R2 into the local inbox.
+
+    Deliberately stops there rather than delivering them itself: everything
+    downstream - adopting the transcript, posting it, updating the database -
+    already works against a local directory, and keeping the download as a
+    separate step means the two storage backends share one delivery path.
+
+    Downloads land in a staging directory outside the inbox and are renamed in
+    once complete. Otherwise `DONE` - which sorts before `transcript.md` - would
+    appear first and the delivery pass could pick up a half-downloaded session.
+    """
+
+    def __init__(self, store: R2Store, config) -> None:  # noqa: ANN001 - Config
+        self.store = store
+        self.config = config
+
+    @property
+    def staging_dir(self) -> Path:
+        return self.config.data_dir / ".inbox-staging"
+
+    def _fetch(self, session_id: str) -> None:
+        """Blocking. Download, move into place, then release the R2 copy."""
+        staging = self.staging_dir
+        staging.mkdir(parents=True, exist_ok=True)
+        scratch = staging / session_id
+        shutil.rmtree(scratch, ignore_errors=True)
+
+        downloaded = self.store.download_session(INBOX_PREFIX, session_id, staging)
+        if not (downloaded / TRANSCRIPT_MD).is_file():
+            shutil.rmtree(downloaded, ignore_errors=True)
+            raise DeliveryError(f"R2 inbox entry {session_id} has no {TRANSCRIPT_MD}")
+
+        downloaded.rename(self.config.inbox_dir / session_id)
+        # Safe to drop: the transcript is on this disk now, and the transcriber
+        # keeps its own archive.
+        self.store.delete_session(INBOX_PREFIX, session_id)
+
+    async def run_once(self) -> list[str]:
+        """Fetch every finished transcript. Returns the ids now waiting locally."""
+        fetched: list[str] = []
+        try:
+            session_ids = await asyncio.to_thread(
+                self.store.marked_sessions, INBOX_PREFIX, DONE_MARKER
+            )
+        except Exception:  # noqa: BLE001 - an R2 outage must not kill the loop
+            log.exception("Could not list the R2 inbox")
+            return []
+
+        for session_id in session_ids:
+            if (self.config.inbox_dir / session_id).exists():
+                # Already waiting locally, possibly mid-delivery. Leave both alone.
+                continue
+            try:
+                await asyncio.to_thread(self._fetch, session_id)
+            except Exception:  # noqa: BLE001 - one bad transcript must not stop the rest
+                log.exception("Could not fetch transcript %s from R2", session_id)
+                continue
+            fetched.append(session_id)
+            log.info("Fetched transcript for session %s from R2", session_id)
+        return fetched
 
 
 class InboxDelivery:
