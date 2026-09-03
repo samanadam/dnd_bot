@@ -1,7 +1,10 @@
 """/character commands.
 
-Mappings are global (one character per Discord user) and anyone may edit anyone
-else's - access control here is deliberately open, matching the rest of the bot.
+Mappings are global: one character per Discord user. Setting your own is open to
+everyone, because a player naming their own character is the ordinary case.
+Setting or clearing *somebody else's* is gated - the label chosen here is what
+that person is called in every future transcript, so it is not a thing to leave
+open to anyone who can type.
 """
 
 from __future__ import annotations
@@ -10,6 +13,8 @@ import logging
 
 import discord
 from discord.ext import commands
+
+from ..access import require_privileged
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +25,13 @@ class CharacterCog(commands.Cog):
     def __init__(self, bot: discord.Bot) -> None:
         self.bot = bot
         self.db = bot.db
+        self.config = bot.config
+
+    async def _may_edit(self, ctx: discord.ApplicationContext, user: discord.Member) -> bool:
+        """Anyone may name their own character; naming someone else's is gated."""
+        if getattr(ctx.author, "id", None) == user.id:
+            return True
+        return await require_privileged(ctx, self.config)
 
     @character.command(name="set", description="Map a Discord user to a character name")
     async def set_character(
@@ -29,6 +41,8 @@ class CharacterCog(commands.Cog):
         character_name: discord.Option(str, "Character name to use in transcripts"),  # noqa: F821
     ) -> None:
         await ctx.defer()
+        if not await self._may_edit(ctx, user):
+            return
         name = character_name.strip()
         if not name:
             await ctx.respond("Character name cannot be empty.")
@@ -47,6 +61,8 @@ class CharacterCog(commands.Cog):
         user: discord.Option(discord.Member, "The player"),  # noqa: F821
     ) -> None:
         await ctx.defer()
+        if not await self._may_edit(ctx, user):
+            return
         await self.db.clear_character(user.id)
         await ctx.respond(
             f"Cleared the character mapping for {user.display_name}. "

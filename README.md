@@ -91,8 +91,8 @@ members with **Manage Guild** or the role named by `SESSION_ADMIN_ROLE_ID`.
 | `/session transcript <id>` 🔒 | Re-posts a past session's transcript. |
 | `/session recover <id>` 🔒 | Finalizes and stages a session left open by a crash. |
 | `/session export <id>` 🔒 | Zips a session's transcript and any audio still here. |
-| `/character set <user> <name>` | Maps a Discord user to a character name. |
-| `/character clear <user>` | Removes a mapping. |
+| `/character set <user> <name>` | Maps a Discord user to a character name. 🔒 for anyone but yourself. |
+| `/character clear <user>` | Removes a mapping. 🔒 for anyone but yourself. |
 | `/character list` | Shows all mappings. |
 
 **Speaker labels** resolve as character name (`/character set`) → server nickname
@@ -140,6 +140,7 @@ Copy `.env.example` to `.env`. Every setting is read from the environment.
 | `AUDIO_FORMAT` | `opus` | ~32× smaller than `wav`, no measured accuracy cost. |
 | `AUDIO_RETENTION_DAYS` | `7` | Days before audio still here is deleted. |
 | `DISK_WARNING_THRESHOLD_MB` | `5000` | Warn below this much free space. |
+| `EXPECTED_SESSION_HOURS` | `4` | Session length assumed by the free-space check at `/session start`. |
 | `ADMIN_USER_ID` | — | Fallback DM recipient for warnings and fatal errors. Always privileged. |
 | `SESSION_ADMIN_ROLE_ID` | — | Role allowed to run the 🔒 commands. Manage Guild works regardless. |
 | `STORAGE_BACKEND` | `local` | `local` (transcriber pulls over SSH) or `r2` (Cloudflare R2). |
@@ -168,12 +169,20 @@ Audio is encoded to Opus at the end of each session:
 | 3 h | 194 MB | 324 MB | 454 MB |
 | 4 h | 259 MB | 432 MB | 605 MB |
 
-Staged audio is deleted as soon as the transcriber confirms it has a copy, so
-the steady-state footprint is small. **During play, though, the raw PCM capture
-is full size** — budget ~0.7 GB per speaker-hour of free space, released when
-the session is finalized.
+Staged audio is deleted as soon as R2 confirms it holds every byte, so the
+steady-state footprint is small. **During play, though, the raw PCM capture is
+full size** — budget ~0.7 GB per speaker-hour of free space, released when the
+session is finalized.
 
-A 40 GB VPS with 1 GB RAM is comfortable.
+The peak lands at `/session stop`: every speaker's raw capture is still on disk
+while the first one is encoded, and encoding writes an intermediate WAV. So a
+6-hour game with 6 speakers touches roughly **29 GB** before it starts falling.
+`/session start` refuses outright when the disk cannot hold
+`EXPECTED_SESSION_HOURS` at the current headcount, because running out mid-game
+does not raise — the recording would silently stop capturing.
+
+A 40 GB VPS with 1 GB RAM suits 3–4 hour games. For 6-hour tables, or a host
+shared with other services, size for the peak above.
 
 ### First run
 
@@ -202,8 +211,13 @@ minutes.
 What the compose file does for you:
 
 - `restart: unless-stopped` — survives host reboots.
-- `stop_grace_period: 60s` — shutdown finalizes in-progress recordings first.
-  Docker's 10 s default would `SIGKILL` that halfway through and lose audio.
+- `stop_grace_period: 600s` — shutdown finalizes in-progress recordings first,
+  and a long session is minutes of encoding. Docker's 10 s default would
+  `SIGKILL` that almost immediately. Even if a restart still cuts it short
+  nothing is lost — the raw capture survives and `/session recover <id>`
+  finishes it — but that recovery is manual.
+- `no-new-privileges` and `cap_drop: ALL` — the container writes files and
+  talks to two APIs; it needs no Linux capabilities at all.
 - `init: true` — reaps ffmpeg subprocesses and forwards signals cleanly.
 - `mem_limit: 1g`, `cpus: 1.0` — this half only writes packets to disk.
 - Log rotation capped at 3 × 10 MB.
@@ -383,6 +397,9 @@ tests, and builds the image on every push.
 
 - Audio is flushed every ~5 seconds, not per packet. A hard crash can lose the
   last few seconds per speaker — not the whole session.
+- If the disk fills *during* a session the write fails, is logged, and recording
+  continues without capturing. The check at `/session start` prevents the common
+  case; nothing catches it mid-game.
 - One bot token records one voice channel at a time; Discord allows a single
   voice connection per account per server.
 - If a voice connection drops and recovers mid-session, the reconnected audio is

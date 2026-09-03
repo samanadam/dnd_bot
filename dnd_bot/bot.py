@@ -127,8 +127,14 @@ class DnDBot(discord.Bot):
     async def on_application_command_error(
         self, ctx: discord.ApplicationContext, error: Exception
     ) -> None:
+        # The exception text routinely carries server filesystem paths and
+        # occasionally configuration values, so it goes to the log - which the
+        # operator can read - rather than into a Discord channel.
         log.exception("Command %s failed", getattr(ctx.command, "qualified_name", "?"))
-        message = f"Something went wrong: `{type(error).__name__}: {error}`"
+        message = (
+            f"Something went wrong (`{type(error).__name__}`). "
+            "The details are in the bot's logs."
+        )
         with contextlib.suppress(discord.HTTPException):
             if ctx.response.is_done():
                 await ctx.followup.send(message)

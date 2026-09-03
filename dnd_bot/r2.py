@@ -104,18 +104,23 @@ class R2Store:
 
     def list_keys(self, prefix: str) -> list[str]:
         """Every key under a prefix, following continuation tokens."""
-        keys: list[str] = []
+        return sorted(self.list_sizes(prefix))
+
+    def list_sizes(self, prefix: str) -> dict[str, int]:
+        """Every key under a prefix with its stored size, in bytes."""
+        sizes: dict[str, int] = {}
         token: str | None = None
         while True:
             kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
             if token:
                 kwargs["ContinuationToken"] = token
             response = self.client.list_objects_v2(**kwargs)
-            keys += [item["Key"] for item in response.get("Contents", [])]
+            for item in response.get("Contents", []):
+                sizes[item["Key"]] = int(item.get("Size", 0))
             token = response.get("NextContinuationToken")
             if not response.get("IsTruncated") or not token:
                 break
-        return sorted(keys)
+        return sizes
 
     def has_object(self, key: str) -> bool:
         # A prefix listing rather than head_object: one code path, and no
@@ -157,6 +162,38 @@ class R2Store:
         for key in keys:
             self.client.delete_object(Bucket=self.bucket, Key=key)
         return len(keys)
+
+    def verify_session(self, prefix: str, session_id: str, directory: Path, *, marker: str) -> None:
+        """Confirm R2 holds every local file at its exact size.
+
+        The marker alone is not enough justification for deleting the only other
+        copy of a session's audio: it says an upload finished, not that every
+        byte of it arrived. This compares the stored size of each object against
+        the file still on disk, and raises unless they all match.
+        """
+        base = session_prefix(prefix, session_id)
+        stored = self.list_sizes(base)
+        if f"{base}{marker}" not in stored:
+            raise R2Error(f"R2 has no {marker} for {session_id}")
+
+        missing: list[str] = []
+        mismatched: list[str] = []
+        for path in sorted(Path(directory).iterdir()):
+            if not path.is_file() or path.name == marker:
+                continue
+            key = f"{base}{path.name}"
+            if key not in stored:
+                missing.append(path.name)
+            elif stored[key] != path.stat().st_size:
+                mismatched.append(f"{path.name} ({path.stat().st_size} local, {stored[key]} in R2)")
+
+        if missing or mismatched:
+            problems = []
+            if missing:
+                problems.append("missing: " + ", ".join(missing))
+            if mismatched:
+                problems.append("wrong size: " + ", ".join(mismatched))
+            raise R2Error(f"R2 copy of {session_id} is incomplete - {'; '.join(problems)}")
 
     def marked_sessions(self, prefix: str, marker: str) -> list[str]:
         """Session ids whose marker object exists - i.e. finished uploading."""

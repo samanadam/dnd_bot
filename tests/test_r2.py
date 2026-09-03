@@ -13,7 +13,7 @@ import pytest
 from dnd_bot import paths
 from dnd_bot.contract import DONE_MARKER, READY_MARKER
 from dnd_bot.inbox import InboxFetcher
-from dnd_bot.r2 import INBOX_PREFIX, OUTBOX_PREFIX, R2Store, session_prefix
+from dnd_bot.r2 import INBOX_PREFIX, OUTBOX_PREFIX, R2Error, R2Store, session_prefix
 from dnd_bot.uploader import OutboxUploader
 
 
@@ -181,13 +181,25 @@ async def test_uploader_keeps_the_local_copy_when_the_upload_fails(store, config
 async def test_uploader_does_not_re_upload_a_session_already_in_r2(store, config):
     config.ensure_dirs()
     directory = stage_local_outbox(config.outbox_dir, "s1")
-    store.put_bytes("outbox/s1/READY", b"")
-    store.client.uploads.clear()  # forget the seeding write
+    # A complete prior upload: every file, then the marker.
+    store.upload_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+    store.client.uploads.clear()  # forget the seeding writes
 
     uploader = OutboxUploader(store, config)
     assert await uploader.run_once() == ["s1"]
     assert not directory.exists()
     assert store.client.uploads == [], "an already-complete session must not be re-sent"
+
+
+async def test_uploader_refuses_to_trust_a_marker_with_nothing_behind_it(store, config):
+    """A READY object alone is not evidence the audio arrived."""
+    config.ensure_dirs()
+    directory = stage_local_outbox(config.outbox_dir, "s1")
+    store.put_bytes("outbox/s1/READY", b"")
+
+    uploader = OutboxUploader(store, config)
+    assert await uploader.run_once() == []
+    assert (directory / "10.opus").is_file()
 
 
 # -- the inbox fetcher -----------------------------------------------------
@@ -234,3 +246,59 @@ async def test_fetcher_does_not_clobber_a_delivery_already_waiting_locally(store
 def test_finalized_paths_are_untouched_by_any_of_this(config):
     """Guard: the recording path still writes where it always did."""
     assert paths.raw_pcm_path(config.sessions_dir, "s1", "10").name == "10.pcm"
+
+
+# -- verification before deletion ------------------------------------------
+
+
+def test_verify_passes_when_every_file_matches(store, tmp_path):
+    directory = stage_local_outbox(tmp_path / "o", "s1")
+    store.upload_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+
+    store.verify_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+
+
+def test_verify_rejects_a_truncated_object(store, tmp_path):
+    directory = stage_local_outbox(tmp_path / "o", "s1")
+    store.upload_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+    store.client.objects["outbox/s1/10.opus"] = b"truncated"
+
+    with pytest.raises(R2Error, match="wrong size"):
+        store.verify_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+
+
+def test_verify_rejects_a_missing_track(store, tmp_path):
+    directory = stage_local_outbox(tmp_path / "o", "s1")
+    store.upload_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+    del store.client.objects["outbox/s1/11.opus"]
+
+    with pytest.raises(R2Error, match="missing"):
+        store.verify_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+
+
+def test_verify_rejects_a_session_with_no_marker(store, tmp_path):
+    directory = stage_local_outbox(tmp_path / "o", "s1")
+    for item in sorted(directory.iterdir()):
+        if item.name != READY_MARKER:
+            store.put_file(f"outbox/s1/{item.name}", item)
+
+    with pytest.raises(R2Error, match=READY_MARKER):
+        store.verify_session(OUTBOX_PREFIX, "s1", directory, marker=READY_MARKER)
+
+
+async def test_uploader_keeps_the_local_copy_when_verification_fails(store, config):
+    """A silently incomplete upload must never cost the audio."""
+    config.ensure_dirs()
+    directory = stage_local_outbox(config.outbox_dir, "s1")
+    real_upload = store.upload_session
+
+    def upload_then_corrupt(*args, **kwargs):
+        count = real_upload(*args, **kwargs)
+        store.client.objects["outbox/s1/10.opus"] = b"truncated"
+        return count
+
+    store.upload_session = upload_then_corrupt
+
+    uploader = OutboxUploader(store, config)
+    assert await uploader.run_once() == []
+    assert (directory / "10.opus").is_file(), "local audio must survive a bad upload"

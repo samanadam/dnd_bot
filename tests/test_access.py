@@ -93,3 +93,28 @@ def test_the_gated_commands_are_the_ones_that_reach_backwards(command):
 
     source = inspect.getsource(getattr(SessionCog, command).callback)
     assert "require_privileged" in source
+
+
+def test_naming_your_own_character_stays_open_but_others_are_gated():
+    import inspect
+
+    from dnd_bot.cogs.character import CharacterCog
+
+    guard = inspect.getsource(CharacterCog._may_edit)
+    assert "require_privileged" in guard
+    # Self-service must short-circuit before the gate.
+    assert guard.index("ctx.author") < guard.index("require_privileged")
+
+    for command in ("set_character", "clear_character"):
+        source = inspect.getsource(getattr(CharacterCog, command).callback)
+        assert "_may_edit" in source, command
+
+
+def test_command_errors_do_not_leak_server_paths_into_discord():
+    import inspect
+
+    from dnd_bot.bot import DnDBot
+
+    source = inspect.getsource(DnDBot.on_application_command_error)
+    assert "{error}" not in source, "the exception text belongs in the log, not the channel"
+    assert "logs" in source

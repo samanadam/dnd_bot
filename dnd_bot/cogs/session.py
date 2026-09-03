@@ -73,12 +73,14 @@ class SessionCog(commands.Cog):
             return
 
         members = ", ".join(sorted(session.labels.values())) or "nobody yet"
-        await ctx.respond(
-            f"Recording **{session.name}** in **{channel.name}**.\n"
-            f"Session id: `{session.session_id}`\n"
-            f"In channel now: {members}\n"
-            "Stop with `/session stop`."
-        )
+        lines = [
+            f"Recording **{session.name}** in **{channel.name}**.",
+            f"Session id: `{session.session_id}`",
+            f"In channel now: {members}",
+            "Stop with `/session stop`.",
+        ]
+        lines += session.warnings
+        await ctx.respond("\n".join(lines))
 
     @session.command(name="stop", description="Stop your channel's session and hand it over")
     async def stop(self, ctx: discord.ApplicationContext) -> None:

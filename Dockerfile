@@ -3,10 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    DATA_DIR=/data \
-    WHISPER_CACHE_DIR=/models \
-    HF_HOME=/models \
-    XDG_CACHE_HOME=/models
+    DATA_DIR=/data
 
 # ffmpeg encodes the finished session to Opus; libopus is for voice receive.
 RUN apt-get update \
@@ -25,13 +22,14 @@ COPY pyproject.toml ./
 
 # Never run as root.
 RUN useradd --create-home --uid 10001 dndbot \
-    && mkdir -p /data /models \
-    && chown -R dndbot:dndbot /app /data /models
+    && mkdir -p /data \
+    && chown -R dndbot:dndbot /app /data
 USER dndbot
 
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=60s --timeout=10s --start-period=300s --retries=3 \
+# No model download any more, so the bot is ready in seconds.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
     CMD ["python", "/app/scripts/healthcheck.py"]
 
 CMD ["python", "-m", "dnd_bot"]

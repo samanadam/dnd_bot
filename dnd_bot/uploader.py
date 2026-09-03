@@ -47,11 +47,11 @@ class OutboxUploader:
         else:
             log.info("Session %s is already complete in R2; releasing the local copy", session_id)
 
-        # Re-check rather than trusting the writes above: the local audio is
-        # about to be deleted, so "R2 says it is there" is the only acceptable
-        # justification for that.
-        if not self._already_uploaded(session_id):
-            raise RuntimeError(f"R2 has no {READY_MARKER} for {session_id} after upload")
+        # The only copy of this audio is about to be deleted, so verify rather
+        # than trust: every local file must exist in R2 at exactly its own size.
+        # The READY marker says an upload finished, not that all of it arrived.
+        self.store.verify_session(OUTBOX_PREFIX, session_id, directory, marker=READY_MARKER)
+        log.info("Verified R2 holds every file for session %s", session_id)
 
     async def run_once(self) -> list[str]:
         """Upload every staged session. Returns the ids now living in R2."""

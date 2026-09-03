@@ -29,6 +29,16 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _get_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
+
+
 def _get_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -50,6 +60,9 @@ class Config:
     audio_format: str = "opus"
     audio_retention_days: int = 7
     disk_warning_threshold_mb: int = 2000
+    # How long a session is assumed to run, for the free-space check at
+    # /session start. Raw capture is ~0.7 GB per speaker-hour.
+    expected_session_hours: float = 4.0
     admin_user_id: int | None = None
     # Role allowed to run the commands that reach past the current session
     # (/session export, transcript, recover). Manage Guild works regardless.
@@ -217,6 +230,7 @@ def load_config() -> Config:
         audio_format=audio_format,
         audio_retention_days=_get_int("AUDIO_RETENTION_DAYS", 7),
         disk_warning_threshold_mb=_get_int("DISK_WARNING_THRESHOLD_MB", 2000),
+        expected_session_hours=_get_float("EXPECTED_SESSION_HOURS", 4.0),
         admin_user_id=admin_user_id,
         session_admin_role_id=session_admin_role_id,
         export_max_discord_upload_mb=_get_int("EXPORT_MAX_DISCORD_UPLOAD_MB", 25),

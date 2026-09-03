@@ -18,7 +18,7 @@ from typing import Any
 
 import discord
 
-from . import paths
+from . import capacity, paths
 from .config import Config
 from .db import Database
 from .finalize import finalize_session_audio
@@ -53,6 +53,8 @@ class ActiveSession:
     alone_task: asyncio.Task | None = None
     monitor_task: asyncio.Task | None = None
     stopping: bool = False
+    # Non-fatal conditions noticed at start, for the cog to pass on.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def key(self) -> SessionKey:
@@ -151,6 +153,24 @@ class SessionManager:
                 if not permissions.move_members:
                     raise RecordingError(f"**{channel.name}** is full, so I cannot join.")
 
+            # Check the disk before joining. Running out mid-session does not
+            # raise - DiskSink logs and carries on - so the recording would
+            # silently stop capturing while everyone kept playing.
+            speakers = len([m for m in channel.members if not m.bot])
+            room = capacity.estimate(
+                self.config.data_dir, speakers, self.config.expected_session_hours
+            )
+            if not room.sufficient:
+                raise RecordingError(capacity.shortfall_message(room))
+            start_warnings: list[str] = []
+            if not room.comfortable:
+                start_warnings.append(capacity.warning_message(room))
+                log.warning(
+                    "Starting a session with only %.1f GB free (%.1f GB estimated)",
+                    room.free_gb,
+                    room.required_gb,
+                )
+
             session_id = str(uuid.uuid4())
             start_time = utcnow()
             display_name = name or f"{channel.name} {start_time.strftime('%Y-%m-%d %H:%M')}"
@@ -193,6 +213,7 @@ class SessionManager:
                 voice_client=voice_client,
                 sink=self._build_sink(session_id, 0.0, {}),
                 labels=labels,
+                warnings=start_warnings,
             )
             self.active[key] = session
             self._start_recording(session)

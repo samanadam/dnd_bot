@@ -10,8 +10,19 @@ services:
     init: true
 
     # Shutdown finalizes every in-progress recording to disk before exiting.
-    # Docker's 10s default would SIGKILL that halfway through and lose audio.
-    stop_grace_period: 60s
+    # Docker's 10s default would SIGKILL that halfway through. A long session is
+    # tens of GB of WAV plus one Opus encode per speaker, which is minutes of
+    # work - hence the generous window. If a restart still cuts it short nothing
+    # is lost: the raw capture stays on disk and `/session recover <id>` finishes
+    # the job, but the recovery is manual, so give it room to avoid needing one.
+    stop_grace_period: 600s
+
+    # The container writes audio and talks to two APIs. It needs no capabilities
+    # and can never need more privilege than it starts with.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       # Sessions, transcripts, exports, backups and the SQLite database.
       # Audio is bulky - roughly 0.7 GB per hour PER SPEAKER - so point
