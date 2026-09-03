@@ -198,7 +198,6 @@ class SessionManager:
                 start_time=to_iso(start_time),
                 participants=labels,
                 language=self.config.transcribe_language,
-                model_used=self.config.whisper_model,
             )
 
             session = ActiveSession(

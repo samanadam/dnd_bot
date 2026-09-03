@@ -120,7 +120,10 @@ class Database:
         start_time: str,
         participants: dict[str, str],
         language: str,
-        model_used: str,
+        # Which model produced the transcript is not knowable here any more:
+        # this half does not transcribe. The transcriber records it, and the
+        # column stays for the sessions written before the split.
+        model_used: str | None = None,
     ) -> None:
         await self.conn.execute(
             """
