@@ -175,6 +175,20 @@ class SessionManager:
             start_time = utcnow()
             display_name = name or f"{channel.name} {start_time.strftime('%Y-%m-%d %H:%M')}"
 
+            # A voice client left over from a crashed or half-torn-down session
+            # still holds the guild's single voice slot. Connecting on top of it
+            # makes Discord reject the handshake with close code 4006 ("session
+            # no longer valid"), which the library then retries forever.
+            stale = channel.guild.voice_client
+            if stale is not None:
+                log.warning(
+                    "Tearing down a stale voice client in %s before joining %s",
+                    channel.guild.id,
+                    channel.name,
+                )
+                with contextlib.suppress(Exception):
+                    await stale.disconnect(force=True)
+
             try:
                 voice_client = await channel.connect(timeout=30.0, reconnect=True)
             except TimeoutError as exc:
@@ -310,9 +324,14 @@ class SessionManager:
         with contextlib.suppress(Exception):
             session.sink.cleanup()
         # The dead voice client is still registered for this guild, and connect()
-        # refuses a second one, so tear it down first.
-        with contextlib.suppress(Exception):
-            await session.voice_client.disconnect(force=True)
+        # refuses a second one, so tear it down first. The guild may also hold a
+        # different client object than the session does; leaving that one alive
+        # is what turns a reconnect into an endless 4006 retry loop.
+        for client in (session.voice_client, channel.guild.voice_client):
+            if client is None:
+                continue
+            with contextlib.suppress(Exception):
+                await client.disconnect(force=True)
         voice_client = await channel.connect(timeout=30.0, reconnect=True)
         session.voice_client = voice_client
         session.sink = self._build_sink(

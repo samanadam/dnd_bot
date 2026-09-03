@@ -80,6 +80,8 @@ class FakeGuild:
     def __init__(self) -> None:
         self.id = 1
         self.me = FakeMember(999, "bot", bot=True)
+        # discord.Guild always exposes this; None means no live voice connection.
+        self.voice_client = None
 
 
 class FakeChannel:
@@ -154,6 +156,21 @@ async def test_start_creates_the_session_row_and_begins_recording(manager):
     assert row["name"] == "Kamp Gecesi"
     assert row["channel_name"] == "Table"
     assert session.labels == {"10": "Thorin", "11": "aylin"}
+    await mgr.stop(1, 2)
+
+
+async def test_start_disconnects_a_voice_client_a_crash_left_behind(manager):
+    """A leftover client holds the guild's voice slot; joining on top of it is
+    what Discord answers with close code 4006 and the library retries forever."""
+    mgr, _, _ = manager
+    channel = FakeChannel([THORIN])
+    ghost = FakeVoiceClient()
+    channel.guild.voice_client = ghost
+
+    await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name=None)
+
+    assert ghost.disconnected, "the stale client must be torn down before connecting"
+    assert channel.voice_client.recording
     await mgr.stop(1, 2)
 
 
