@@ -137,3 +137,47 @@ def test_cleanup_is_idempotent(tmp_path: Path):
     sink.write(PACKET, 1001)
     sink.cleanup()
     sink.cleanup()  # must not raise
+
+
+class FakeSpeaker:
+    def __init__(self, user_id: int) -> None:
+        self.id = user_id
+
+
+class FakeVoiceData:
+    """What py-cord 2.8 hands to Sink.write: decoded PCM plus the speaker."""
+
+    def __init__(self, pcm: bytes, source) -> None:  # noqa: ANN001 - mirrors py-cord
+        self.pcm = pcm
+        self.source = source
+
+
+def test_a_voice_data_packet_is_written_under_its_speaker(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+
+    sink.write(FakeVoiceData(PACKET, FakeSpeaker(1001)), None)
+    sink.cleanup()
+
+    assert sink.path_for("1001").read_bytes() == PACKET
+    assert sink.speakers == ["1001"]
+
+
+def test_an_unattributed_packet_is_dropped(tmp_path: Path):
+    """No speaker means no label, so the audio could never be transcribed."""
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+
+    sink.write(FakeVoiceData(PACKET, None), None)
+    sink.cleanup()
+
+    assert sink.speakers == []
+    assert list(tmp_path.glob("raw/*.pcm")) == []
+
+
+def test_the_sink_satisfies_the_receive_routers_contract(tmp_path: Path):
+    """py-cord 2.8's SinkEventRouter reads both off every sink before recording."""
+    sink = make_sink(tmp_path, [0.0])
+
+    assert sink.__sink_listeners__ == ()
+    assert list(sink.walk_children()) == []

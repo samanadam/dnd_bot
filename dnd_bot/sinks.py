@@ -36,6 +36,18 @@ class DiskSink(Sink):
 
     encoding = "pcm"
 
+    # py-cord 2.8 ships a rewritten receive path whose SinkEventRouter reads
+    # these off every sink, but the matching Sink base class did not land with
+    # it - discord.sinks.Sink still has neither, so start_recording() dies with
+    # AttributeError before a single packet arrives. Audio itself does not go
+    # through the listener system (PacketRouter calls sink.write directly), so
+    # declaring an empty set of listeners is enough to get recording working.
+    # Remove once the sink rewrite lands upstream (Pycord issue #3139).
+    __sink_listeners__: tuple[tuple[str, str], ...] = ()
+
+    def walk_children(self) -> tuple[()]:
+        return ()
+
     def __init__(
         self,
         raw_dir: Path,
@@ -86,8 +98,19 @@ class DiskSink(Sink):
 
     # -- recording ---------------------------------------------------------
 
-    def write(self, data: bytes, user) -> None:  # noqa: ANN001 - py-cord passes an int or Member
-        if self.finished or not data:
+    def write(self, data, user) -> None:  # noqa: ANN001 - py-cord signature
+        """Append one speaker's PCM.
+
+        py-cord 2.8 hands in a VoiceData carrying decoded PCM plus the speaker;
+        older versions passed raw bytes and a user. Accept both.
+        """
+        if self.finished:
+            return
+        pcm = getattr(data, "pcm", data)
+        user = getattr(data, "source", None) or user
+        if not pcm or user is None:
+            # A packet Discord could not attribute to anyone is unusable: it
+            # cannot be labelled, so it would only pollute an unnamed file.
             return
         user_id = str(getattr(user, "id", user))
         handle = self._files.get(user_id)
@@ -112,11 +135,11 @@ class DiskSink(Sink):
                     log.exception("on_new_speaker callback failed for %s", user_id)
 
         try:
-            handle.write(data)
+            handle.write(pcm)
         except OSError:
             log.exception("Failed writing audio for user %s", user_id)
             return
-        self._bytes[user_id] = self._bytes.get(user_id, 0) + len(data)
+        self._bytes[user_id] = self._bytes.get(user_id, 0) + len(pcm)
 
         if now - self._last_flush.get(user_id, 0.0) >= self.flush_interval:
             self._flush_one(user_id)
