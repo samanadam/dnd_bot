@@ -18,7 +18,7 @@ from .config import Config, ConfigError, load_config
 from .db import Database
 from .inbox import InboxDelivery, InboxFetcher
 from .notify import DiscordNotifier
-from .r2 import R2Store
+from .r2 import OUTBOX_PREFIX, R2Error, R2Store
 from .recorder import SessionManager
 from .recovery import scan_for_recoverable
 from .timeutil import to_iso, utcnow
@@ -77,11 +77,11 @@ class DnDBot(discord.Bot):
         self._started = True
         log.info("Logged in as %s (guild %s)", self.user, self.config.guild_id)
 
-        # Start the heartbeat before loading the model: the first run downloads
-        # ~1.5 GB, which can easily outlast the healthcheck's start period, and
-        # a container killed as "unhealthy" mid-download would never finish.
+        # Heartbeat first: the healthcheck reads it, and the startup checks
+        # below reach the network, so a slow one must not read as unhealthy.
         self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
 
+        await self._check_object_storage()
         await self._report_recoverable()
 
         self._tasks += [
@@ -96,6 +96,30 @@ class DnDBot(discord.Bot):
             "Cloudflare R2" if self.config.uses_r2 else "the local filesystem",
             await self.db.pending_count(),
         )
+
+    async def _check_object_storage(self) -> None:
+        """Prove R2 is reachable now, rather than at the end of a session.
+
+        Bad credentials do not stop the bot recording - they stop it handing
+        anything over, silently, while sessions pile up on disk. Non-fatal on
+        purpose: recording locally and uploading later is better than refusing
+        to start because Cloudflare is briefly unreachable.
+        """
+        if self.store is None:
+            return
+        try:
+            await asyncio.to_thread(self.store.list_keys, f"{OUTBOX_PREFIX}/")
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            message = (
+                f"Cannot reach the R2 bucket `{self.config.r2_bucket}`: "
+                f"`{type(exc).__name__}`. Recording still works, but finished "
+                "sessions will stay on this disk until it is fixed. Check the "
+                "R2_* settings, then restart."
+            )
+            log.error("R2 is not reachable: %s", exc)
+            await self.notifier.send_dm(self.config.admin_user_id, message)
+            return
+        log.info("R2 bucket %s is reachable", self.config.r2_bucket)
 
     async def _report_recoverable(self) -> None:
         """A crash-orphaned session is worthless unless somebody is told about it."""
@@ -248,7 +272,14 @@ async def run() -> int:
     db = Database(config.db_path)
     await db.connect()
 
-    bot = DnDBot(config, db)
+    try:
+        bot = DnDBot(config, db)
+    except R2Error as exc:
+        # Same reasoning as ConfigError above: a misconfigured bucket is a human
+        # problem, and a traceback in a restart loop is a miserable way to meet it.
+        log.critical("Object storage error: %s", exc)
+        await db.close()
+        return 2
     install_signal_handlers(asyncio.get_running_loop(), bot)
     try:
         await bot.start(config.discord_token)
