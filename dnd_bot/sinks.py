@@ -48,6 +48,10 @@ class DiskSink(Sink):
     def walk_children(self) -> tuple[()]:
         return ()
 
+    def is_opus(self) -> bool:
+        """False, so py-cord decodes Opus to PCM before handing packets over."""
+        return False
+
     def __init__(
         self,
         raw_dir: Path,

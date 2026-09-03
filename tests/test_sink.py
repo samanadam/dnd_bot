@@ -175,9 +175,30 @@ def test_an_unattributed_packet_is_dropped(tmp_path: Path):
     assert list(tmp_path.glob("raw/*.pcm")) == []
 
 
-def test_the_sink_satisfies_the_receive_routers_contract(tmp_path: Path):
-    """py-cord 2.8's SinkEventRouter reads both off every sink before recording."""
+# Everything py-cord 2.8's receive path reads off a sink. Its own Sink base
+# class provides none of the first three, so each missing one crashed a live
+# recording that the rest of the suite could not catch. Derived by grepping
+# discord/voice/receive/ and discord/opus.py for "sink.".
+RECEIVE_PATH_CONTRACT = ("__sink_listeners__", "walk_children", "is_opus", "client", "write")
+
+
+def test_the_sink_satisfies_the_receive_paths_contract(tmp_path: Path):
     sink = make_sink(tmp_path, [0.0])
+
+    missing = [name for name in RECEIVE_PATH_CONTRACT if not hasattr(sink, name)]
+    assert missing == [], f"py-cord will crash mid-recording on: {missing}"
 
     assert sink.__sink_listeners__ == ()
     assert list(sink.walk_children()) == []
+    assert sink.is_opus() is False, "True would hand us undecoded Opus, not PCM"
+
+
+def test_init_gives_the_sink_the_voice_client(tmp_path: Path):
+    """The packet decoder maps an ssrc back to a speaker through sink.client."""
+    sink = make_sink(tmp_path, [0.0])
+    assert sink.client is None
+
+    voice_client = object()
+    sink.init(voice_client)
+
+    assert sink.client is voice_client

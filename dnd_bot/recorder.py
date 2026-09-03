@@ -303,6 +303,11 @@ class SessionManager:
                 "Joined the voice channel but the voice connection never came up. Try again."
             )
 
+        # The 2.8 reader never hands the voice client to the sink - the line
+        # that used to is commented out upstream - but its packet decoder reads
+        # sink.client to map an ssrc back to a speaker. init() is the library's
+        # own hook for this, so call it ourselves.
+        session.sink.init(session.voice_client)
         session.voice_client.start_recording(session.sink, finished)
 
     # -- connection resilience --------------------------------------------
