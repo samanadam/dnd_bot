@@ -61,7 +61,10 @@ class DnDBot(discord.Bot):
         self.uploader = OutboxUploader(self.store, config) if self.store else None
         self.fetcher = InboxFetcher(self.store, config) if self.store else None
 
-        self._tasks: list[asyncio.Task] = []
+        # NOT `_tasks`: discord.Client uses that name for its own set of
+        # internal tasks and calls .add() on it, so shadowing it here
+        # crashes the library the moment it schedules anything.
+        self._background_tasks: list[asyncio.Task] = []
         self._started = False
         self._shutting_down = False
 
@@ -79,18 +82,18 @@ class DnDBot(discord.Bot):
 
         # Heartbeat first: the healthcheck reads it, and the startup checks
         # below reach the network, so a slow one must not read as unhealthy.
-        self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
+        self._background_tasks.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
 
         await self._check_object_storage()
         await self._report_recoverable()
 
-        self._tasks += [
+        self._background_tasks += [
             asyncio.create_task(self._inbox_loop(), name="inbox"),
             asyncio.create_task(self._cleanup_loop(), name="cleanup"),
             asyncio.create_task(self._backup_loop(), name="backup"),
         ]
         if self.uploader is not None:
-            self._tasks.append(asyncio.create_task(self._upload_loop(), name="upload"))
+            self._background_tasks.append(asyncio.create_task(self._upload_loop(), name="upload"))
         log.info(
             "Bot ready; handover via %s; %s session(s) waiting on the transcriber",
             "Cloudflare R2" if self.config.uses_r2 else "the local filesystem",
@@ -175,9 +178,9 @@ class DnDBot(discord.Bot):
             results = await self.manager.shutdown_all()
             for result in results:
                 log.info("Finalized %s on shutdown (queued=%s)", result.session_id, result.enqueued)
-        for task in self._tasks:
+        for task in self._background_tasks:
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*self._background_tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
             await self.close()
         await self.db.close()
