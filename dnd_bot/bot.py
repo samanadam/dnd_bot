@@ -157,7 +157,14 @@ class DnDBot(discord.Bot):
         # The exception text routinely carries server filesystem paths and
         # occasionally configuration values, so it goes to the log - which the
         # operator can read - rather than into a Discord channel.
-        log.exception("Command %s failed", getattr(ctx.command, "qualified_name", "?"))
+        # py-cord hands the error in as an argument rather than re-raising it,
+        # so there is no active exception for log.exception to pick up - it used
+        # to log "NoneType: None" and throw the real traceback away.
+        log.error(
+            "Command %s failed",
+            getattr(ctx.command, "qualified_name", "?"),
+            exc_info=error,
+        )
         message = (
             f"Something went wrong (`{type(error).__name__}`). "
             "The details are in the bot's logs."

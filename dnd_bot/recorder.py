@@ -229,7 +229,7 @@ class SessionManager:
                 warnings=start_warnings,
             )
             self.active[key] = session
-            self._start_recording(session)
+            await self._start_recording(session)
             session.monitor_task = asyncio.create_task(self._monitor_connection(session))
             log.info("Session %s started in #%s by %s", session_id, channel.name, invoker.id)
             return session
@@ -277,9 +277,31 @@ class SessionManager:
         except Exception:  # noqa: BLE001 - never let a callback kill the session
             log.exception("Failed registering speaker %s for %s", user_id, session_id)
 
-    def _start_recording(self, session: ActiveSession) -> None:
-        def finished(sink: DiskSink, *args) -> None:  # noqa: ANN001 - py-cord callback
-            log.debug("Recording callback fired for %s", session.session_id)
+    async def _start_recording(self, session: ActiveSession) -> None:
+        def finished(exception: Exception | None = None) -> None:
+            # py-cord 2.7 changed this callback to take the exception that ended
+            # the recording, if any. A silent death here used to look exactly
+            # like a session where nobody talked.
+            if exception is None:
+                log.debug("Recording callback fired for %s", session.session_id)
+            else:
+                log.error(
+                    "Recording for %s ended with an error",
+                    session.session_id,
+                    exc_info=exception,
+                )
+
+        # connect() returns before the voice socket is actually running, and
+        # start_recording refuses a client that is not connected yet. The wait
+        # is a threading event, so it must not run on the event loop.
+        loop = asyncio.get_running_loop()
+        connected = await loop.run_in_executor(
+            None, session.voice_client.wait_until_connected, 30.0
+        )
+        if not connected:
+            raise RecordingError(
+                "Joined the voice channel but the voice connection never came up. Try again."
+            )
 
         session.voice_client.start_recording(session.sink, finished)
 
@@ -337,7 +359,7 @@ class SessionManager:
         session.sink = self._build_sink(
             session.session_id, session.elapsed_seconds(), dict(session.offsets)
         )
-        self._start_recording(session)
+        await self._start_recording(session)
 
     async def _finalize_after_connection_loss(self, session: ActiveSession) -> None:
         log.error(

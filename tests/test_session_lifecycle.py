@@ -56,6 +56,7 @@ class FakeVoiceClient:
         self.sink = None
         self.disconnected = False
         self._connected = True
+        self.connect_succeeds = True
 
     def start_recording(self, sink, callback, *args) -> None:
         self.recording = True
@@ -66,6 +67,9 @@ class FakeVoiceClient:
 
     def is_connected(self) -> bool:
         return self._connected
+
+    def wait_until_connected(self, timeout: float | None = 30.0) -> bool:
+        return self._connected and self.connect_succeeds
 
     async def disconnect(self, force: bool = False) -> None:
         self.disconnected = True
@@ -172,6 +176,19 @@ async def test_start_disconnects_a_voice_client_a_crash_left_behind(manager):
     assert ghost.disconnected, "the stale client must be torn down before connecting"
     assert channel.voice_client.recording
     await mgr.stop(1, 2)
+
+
+async def test_start_refuses_when_the_voice_socket_never_comes_up(manager):
+    """connect() returns before the voice socket is running, so a session that
+    starts recording anyway would capture nothing."""
+    mgr, db, _ = manager
+    channel = FakeChannel([THORIN])
+    channel.voice_client.connect_succeeds = False
+
+    with pytest.raises(RecordingError, match="never came up"):
+        await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name=None)
+
+    assert not channel.voice_client.recording
 
 
 async def test_start_refuses_a_second_session_in_the_same_channel(manager):
