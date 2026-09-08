@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -22,6 +21,7 @@ from . import capacity, paths
 from .config import Config
 from .db import Database
 from .finalize import finalize_session_audio
+from .ids import new_session_id, short_id
 from .labels import resolve_label
 from .outbox import publish
 from .sinks import DiskSink
@@ -189,8 +189,8 @@ class SessionManager:
                     room.required_gb,
                 )
 
-            session_id = str(uuid.uuid4())
             start_time = utcnow()
+            session_id = new_session_id(start_time, self.config.tz)
             display_name = name or f"{channel.name} {start_time.strftime('%Y-%m-%d %H:%M')}"
 
             # A voice client left over from a crashed or half-torn-down session
@@ -618,7 +618,7 @@ class SessionManager:
                 duration = max(0.0, (end_dt - start_dt).total_seconds())
         return StopResult(
             session_id=session_id,
-            name=row.get("name") or session_id[:8],
+            name=row.get("name") or short_id(session_id),
             duration_seconds=duration,
             speakers=sorted(labels.get(p.stem, p.stem) for p in written),
             warnings=warnings,

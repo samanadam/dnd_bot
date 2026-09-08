@@ -23,6 +23,7 @@ from .contract import (
     ready_sessions,
     write_metadata,
 )
+from .ids import short_id
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def metadata_from_session(
     """Freeze everything the transcriber will need into a portable record."""
     return SessionMetadata(
         session_id=session["id"],
-        name=session.get("name") or f"Session {str(session['id'])[:8]}",
+        name=session.get("name") or f"Session {short_id(str(session['id']))}",
         start_time_utc=session["start_time"],
         end_time_utc=session.get("end_time"),
         timezone=timezone_name,

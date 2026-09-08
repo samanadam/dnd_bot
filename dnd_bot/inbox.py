@@ -21,6 +21,7 @@ from typing import Any
 
 from . import outbox, paths
 from .contract import DONE_MARKER, TRANSCRIPT_JSON, TRANSCRIPT_MD, done_sessions
+from .ids import short_id
 from .r2 import INBOX_PREFIX, R2Store
 from .timeutil import to_iso, utcnow
 
@@ -162,7 +163,7 @@ class InboxDelivery:
 
         transcript_md, transcript_json = adopt(inbox_dir, self.config.sessions_dir, session_id)
 
-        name = session.get("name") or session_id[:8]
+        name = session.get("name") or short_id(session_id)
         message = (
             f"Transcript ready for session **{name}** (`{session_id}`)\n"
             f"{summarize(transcript_md)}"
