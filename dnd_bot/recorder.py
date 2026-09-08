@@ -31,6 +31,24 @@ log = logging.getLogger(__name__)
 
 SessionKey = tuple[int, int]
 
+# Discord encrypts voice with DAVE (E2EE). The MLS session is negotiated after
+# the socket comes up, and packets that arrive before it is ready decrypt to
+# garbage, so the first seconds of a session would be lost noise. Wait for it,
+# but never block a session on it - a guild that never negotiates DAVE has no
+# session object at all, and recording still has to start there.
+DAVE_READY_TIMEOUT = 10.0
+
+
+async def _wait_for_dave(voice_client: Any, timeout: float = DAVE_READY_TIMEOUT) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        state = getattr(voice_client, "_connection", None)
+        dave = getattr(state, "dave_session", None)
+        if dave is None or getattr(dave, "ready", False):
+            return
+        await asyncio.sleep(0.1)
+    log.warning("DAVE session was not ready after %.0fs; recording anyway", timeout)
+
 
 class RecordingError(RuntimeError):
     """User-facing failure while starting or stopping a recording."""
@@ -302,6 +320,8 @@ class SessionManager:
             raise RecordingError(
                 "Joined the voice channel but the voice connection never came up. Try again."
             )
+
+        await _wait_for_dave(session.voice_client)
 
         # The 2.8 reader never hands the voice client to the sink - the line
         # that used to is commented out upstream - but its packet decoder reads

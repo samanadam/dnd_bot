@@ -6,8 +6,9 @@ ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data
 
 # ffmpeg encodes the finished session to Opus; libopus is for voice receive.
+# git only installs the pinned py-cord commit (see requirements.txt).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libopus0 ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg libopus0 ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

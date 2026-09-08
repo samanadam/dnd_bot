@@ -36,13 +36,13 @@ class DiskSink(Sink):
 
     encoding = "pcm"
 
-    # py-cord 2.8 ships a rewritten receive path whose SinkEventRouter reads
-    # these off every sink, but the matching Sink base class did not land with
-    # it - discord.sinks.Sink still has neither, so start_recording() dies with
-    # AttributeError before a single packet arrives. Audio itself does not go
-    # through the listener system (PacketRouter calls sink.write directly), so
-    # declaring an empty set of listeners is enough to get recording working.
-    # Remove once the sink rewrite lands upstream (Pycord issue #3139).
+    # The receive path's SinkEventRouter reads these off every sink. Released
+    # py-cord 2.8.x has the router but not the matching Sink base class, so
+    # start_recording() died with AttributeError before a packet arrived; the
+    # pinned voice-receive branch does define both. Declaring them here keeps
+    # the sink working on either side of that line. Audio itself never goes
+    # through the listener system - PacketRouter calls sink.write directly -
+    # so an empty set of listeners is correct, not just a stopgap.
     __sink_listeners__: tuple[tuple[str, str], ...] = ()
 
     def walk_children(self) -> tuple[()]:

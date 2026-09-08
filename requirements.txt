@@ -1,4 +1,8 @@
-py-cord[voice]==2.8.0
+# Voice receive needs the DAVE (E2EE) decrypt path, which is not in any release
+# yet: 2.8.1 still decrypts after Opus decode, so every packet comes back as
+# "OpusError: corrupted stream" and tracks land empty. Pinned to the exact
+# commit of the upstream voice-receive rework (Pycord PR #3159) until it ships.
+py-cord[voice] @ git+https://github.com/Pycord-Development/pycord@10a5e8cf13bd8db21f95baf62cf866056d1e1091
 aiosqlite==0.20.0
 python-dotenv==1.0.1
 boto3==1.35.99
