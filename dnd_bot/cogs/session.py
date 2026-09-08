@@ -12,8 +12,6 @@ whatever channel the caller happens to be in. See `access.py`.
 All bot-facing text is English, independent of the transcript language.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 
@@ -51,7 +49,7 @@ class SessionCog(commands.Cog):
     async def start(
         self,
         ctx: discord.ApplicationContext,
-        name: discord.Option(str, "Name for this session", required=False) = None,  # noqa: F821
+        name: discord.Option(str, "Name for this session", required=False) = None,
     ) -> None:
         await ctx.defer()
         channel = _voice_channel_of(ctx)
@@ -193,7 +191,7 @@ class SessionCog(commands.Cog):
     async def transcript(
         self,
         ctx: discord.ApplicationContext,
-        session_id: discord.Option(str, "Session id from /session list"),  # noqa: F821
+        session_id: discord.Option(str, "Session id from /session list"),
     ) -> None:
         await ctx.defer()
         if not await require_privileged(ctx, self.config):
@@ -228,7 +226,7 @@ class SessionCog(commands.Cog):
     async def recover(
         self,
         ctx: discord.ApplicationContext,
-        session_id: discord.Option(str, "Session id reported at startup"),  # noqa: F821
+        session_id: discord.Option(str, "Session id reported at startup"),
     ) -> None:
         await ctx.defer()
         if not await require_privileged(ctx, self.config):
@@ -255,7 +253,7 @@ class SessionCog(commands.Cog):
     async def export(
         self,
         ctx: discord.ApplicationContext,
-        session_id: discord.Option(str, "Session id from /session list"),  # noqa: F821
+        session_id: discord.Option(str, "Session id from /session list"),
     ) -> None:
         await ctx.defer()
         if not await require_privileged(ctx, self.config):

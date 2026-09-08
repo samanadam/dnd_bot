@@ -7,8 +7,6 @@ that person is called in every future transcript, so it is not a thing to leave
 open to anyone who can type.
 """
 
-from __future__ import annotations
-
 import logging
 
 import discord
@@ -37,8 +35,8 @@ class CharacterCog(commands.Cog):
     async def set_character(
         self,
         ctx: discord.ApplicationContext,
-        user: discord.Option(discord.Member, "The player"),  # noqa: F821
-        character_name: discord.Option(str, "Character name to use in transcripts"),  # noqa: F821
+        user: discord.Option(discord.Member, "The player"),
+        character_name: discord.Option(str, "Character name to use in transcripts"),
     ) -> None:
         await ctx.defer()
         if not await self._may_edit(ctx, user):
@@ -58,7 +56,7 @@ class CharacterCog(commands.Cog):
     async def clear_character(
         self,
         ctx: discord.ApplicationContext,
-        user: discord.Option(discord.Member, "The player"),  # noqa: F821
+        user: discord.Option(discord.Member, "The player"),
     ) -> None:
         await ctx.defer()
         if not await self._may_edit(ctx, user):
