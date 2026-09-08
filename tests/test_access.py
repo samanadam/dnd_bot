@@ -8,6 +8,7 @@ import pytest
 
 from dnd_bot.access import DENIED_MESSAGE, ctx_is_privileged, is_privileged, require_privileged
 
+# I just needed a commit
 
 def test_the_configured_admin_always_gets_through():
     assert is_privileged(user_id=999, admin_user_id=999)
