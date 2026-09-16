@@ -154,5 +154,5 @@ def test_metadata_json_is_readable_by_a_plain_json_parser(tmp_path: Path):
         timezone_name="UTC",
     )
     payload = json.loads((target / "metadata.json").read_text(encoding="utf-8"))
-    assert payload["schema"] == 1
+    assert payload["schema"] == 2
     assert payload["audio_format"] == "opus"

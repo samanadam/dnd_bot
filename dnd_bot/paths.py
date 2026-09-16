@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .contract import track_filename
+
 
 def session_dir(sessions_root: Path, session_id: str) -> Path:
     return sessions_root / session_id
@@ -22,9 +24,13 @@ def raw_pcm_path(sessions_root: Path, session_id: str, user_id: str) -> Path:
 
 
 def finalized_audio_path(
-    sessions_root: Path, session_id: str, user_id: str, audio_format: str = "wav"
+    sessions_root: Path,
+    session_id: str,
+    user_id: str,
+    audio_format: str = "wav",
+    label: str | None = None,
 ) -> Path:
-    return audio_dir(sessions_root, session_id) / f"{user_id}.{audio_format}"
+    return audio_dir(sessions_root, session_id) / track_filename(user_id, label, audio_format)
 
 
 def transcript_md_path(sessions_root: Path, session_id: str) -> Path:

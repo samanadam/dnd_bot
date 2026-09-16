@@ -7,6 +7,7 @@ shutdown, and `/session recover` after a crash.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import paths
@@ -27,9 +28,17 @@ def has_raw_audio(sessions_root: Path, session_id: str) -> bool:
 
 
 def finalize_session_audio(
-    sessions_root: Path, session_id: str, audio_format: str = "wav", *, keep_raw: bool = False
+    sessions_root: Path,
+    session_id: str,
+    audio_format: str = "wav",
+    *,
+    labels: Mapping[str, str] | None = None,
+    keep_raw: bool = False,
 ) -> tuple[list[Path], list[str]]:
     """Finalize every speaker capture. Returns (written files, warnings).
+
+    `labels` ({user_id: name}) puts each speaker's name at the front of their
+    file, so a folder or bucket listing shows who is who.
 
     A single unreadable capture is reported as a warning rather than aborting the
     whole session - one broken speaker file should not cost everyone else their
@@ -37,9 +46,12 @@ def finalize_session_audio(
     """
     written: list[Path] = []
     warnings: list[str] = []
+    labels = labels or {}
     for pcm_path in raw_captures(sessions_root, session_id):
         user_id = pcm_path.stem
-        out_path = paths.finalized_audio_path(sessions_root, session_id, user_id, audio_format)
+        out_path = paths.finalized_audio_path(
+            sessions_root, session_id, user_id, audio_format, labels.get(user_id)
+        )
         try:
             finalize_capture(pcm_path, out_path, audio_format)
         except AudioError as exc:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -202,3 +203,32 @@ def test_init_gives_the_sink_the_voice_client(tmp_path: Path):
     sink.init(voice_client)
 
     assert sink.client is voice_client
+
+
+def test_the_sink_ignores_the_bots_own_audio(tmp_path: Path):
+    """Playback must never land in the recording.
+
+    Discord does not loop a bot's own transmission back to it, so this guard
+    should never fire in practice. It exists because the failure it prevents -
+    a track file named after the bot, full of the music it just played - would
+    be discovered late and be hard to explain.
+    """
+    sink = DiskSink(tmp_path, ignore_user_ids={"999"})
+    sink.write(b"\x01" * 3840, SimpleNamespace(id=999))
+    assert sink.bytes_written("999") == 0
+    assert not list(tmp_path.glob("*.pcm"))
+
+
+def test_the_sink_ignores_any_bot_member(tmp_path: Path):
+    sink = DiskSink(tmp_path)
+    sink.write(b"\x01" * 3840, SimpleNamespace(id=555, bot=True))
+    assert sink.bytes_written("555") == 0
+
+
+def test_the_sink_still_records_humans_while_ignoring_a_bot(tmp_path: Path):
+    sink = DiskSink(tmp_path, ignore_user_ids={"999"})
+    sink.write(b"\x01" * 3840, SimpleNamespace(id=999))
+    sink.write(b"\x02" * 3840, SimpleNamespace(id=10))
+    sink.cleanup()
+    assert sink.bytes_written("10") == 3840
+    assert (tmp_path / "10.pcm").exists()

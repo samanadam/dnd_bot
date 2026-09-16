@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ from dnd_bot.contract import (
     mark,
     read_metadata,
     ready_sessions,
+    track_filename,
+    track_user_id,
     validate_outbox,
     write_metadata,
 )
@@ -143,6 +146,33 @@ def test_validate_rejects_a_session_with_no_audio(tmp_path: Path):
     directory = stage_outbox(tmp_path, tracks=())
     with pytest.raises(ContractError, match="no .opus tracks"):
         validate_outbox(directory)
+
+
+def test_track_names_lead_with_the_speaker_name():
+    assert track_filename("10", "Thorin", "opus") == "Thorin_10.opus"
+    assert track_filename("10", "Şölen Kızı", "opus") == "Şölen-Kızı_10.opus"
+    assert track_filename("10", "a/b\\..c", "opus") == "a-b-c_10.opus"
+    assert track_filename("10", None, "opus") == "10.opus"
+    assert track_filename("10", " ?! ", "opus") == "10.opus"
+
+
+def test_user_id_is_read_back_from_any_track_name():
+    assert track_user_id("Thorin_10.opus") == "10"
+    assert track_user_id(Path("Sir_Snake_Case_10.opus")) == "10"
+    assert track_user_id("10.opus") == "10"
+
+
+def test_schema_one_directories_are_still_readable(tmp_path: Path):
+    """Sessions queued before names were added must not be stranded."""
+    payload = {**SAMPLE.to_dict(), "schema": 1}
+    (tmp_path / "metadata.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert read_metadata(tmp_path).session_id == "s1"
+
+
+def test_named_tracks_match_their_participants(tmp_path: Path):
+    directory = stage_outbox(tmp_path, tracks=("Thorin_10", "Elenya_11"))
+    metadata = validate_outbox(directory)
+    assert metadata.participants == SAMPLE.participants
 
 
 def test_an_unlabelled_speaker_gets_a_placeholder_rather_than_a_failure(tmp_path: Path):

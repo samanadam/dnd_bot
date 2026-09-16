@@ -69,6 +69,17 @@ def test_one_broken_speaker_does_not_block_the_others(tmp_path: Path):
     assert paths.raw_pcm_path(sessions_root, "s1", "11").exists()
 
 
+def test_finalized_tracks_are_named_after_the_speaker(tmp_path: Path):
+    sessions_root = tmp_path / "sessions"
+    paths.ensure_session_dirs(sessions_root, "s1")
+    paths.raw_pcm_path(sessions_root, "s1", "10").write_bytes(b"\x01\x00" * 4800)
+    paths.raw_pcm_path(sessions_root, "s1", "11").write_bytes(b"\x01\x00" * 4800)
+
+    written, _ = finalize_session_audio(sessions_root, "s1", "wav", labels={"10": "Thorin"})
+
+    assert sorted(p.name for p in written) == ["11.wav", "Thorin_10.wav"]
+
+
 def test_captured_seconds_reports_the_longest_speaker(tmp_path: Path):
     sessions_root = tmp_path / "sessions"
     paths.ensure_session_dirs(sessions_root, "s1")

@@ -19,6 +19,7 @@ import discord
 
 from . import capacity, paths
 from .config import Config
+from .contract import track_user_id
 from .db import Database
 from .finalize import finalize_session_audio
 from .ids import new_session_id, short_id
@@ -110,6 +111,10 @@ class SessionManager:
         self.config = config
         self.active: dict[SessionKey, ActiveSession] = {}
         self._locks: dict[SessionKey, asyncio.Lock] = {}
+        # Set by the bot when music is configured. Recording never depends on
+        # it: every call below is guarded and swallowed, because a missing song
+        # is a nuisance and a lost session is not.
+        self.music = None
 
     # -- helpers -----------------------------------------------------------
 
@@ -129,6 +134,27 @@ class SessionManager:
             for member in channel.members
             if not member.bot
         }
+
+    async def _music_release(self, guild_id: int, reason: str) -> None:
+        """Make music let go of the voice slot before we claim it."""
+        if self.music is None:
+            return
+        with contextlib.suppress(Exception):
+            await self.music.detach(guild_id, reason=reason)
+
+    async def _music_rebind(self, session: ActiveSession) -> None:
+        """Hand music the connection we just made, so playback can resume.
+
+        Called after a fresh start and after a reconnect. The reconnect is the
+        one that matters: _resume_recording replaces session.voice_client, and
+        without this the music dies with no error anywhere.
+        """
+        if self.music is None:
+            return
+        with contextlib.suppress(Exception):
+            await self.music.rebind(
+                session.guild_id, session.voice_client, channel_id=session.channel_id
+            )
 
     # -- start -------------------------------------------------------------
 
@@ -197,6 +223,10 @@ class SessionManager:
             # still holds the guild's single voice slot. Connecting on top of it
             # makes Discord reject the handshake with close code 4006 ("session
             # no longer valid"), which the library then retries forever.
+            # Music may be holding this guild's one voice connection. It has
+            # to let go before connect(), or we are fighting a live client.
+            await self._music_release(channel.guild.id, "recording_start")
+
             stale = channel.guild.voice_client
             if stale is not None:
                 log.warning(
@@ -249,6 +279,7 @@ class SessionManager:
             self.active[key] = session
             await self._start_recording(session)
             session.monitor_task = asyncio.create_task(self._monitor_connection(session))
+            await self._music_rebind(session)
             log.info("Session %s started in #%s by %s", session_id, channel.name, invoker.id)
             return session
 
@@ -261,7 +292,13 @@ class SessionManager:
             on_new_speaker=self._make_speaker_callback(session_id),
             base_offset=base_offset,
             known_offsets=known_offsets,
+            ignore_user_ids=self._own_user_ids(),
         )
+
+    def _own_user_ids(self) -> set[str]:
+        """The bot's own id, once it is logged in and has one."""
+        own = getattr(self.bot, "user", None)
+        return {str(own.id)} if own is not None else set()
 
     def _make_speaker_callback(self, session_id: str):
         """The sink runs on the voice thread; hop back onto the event loop."""
@@ -385,6 +422,7 @@ class SessionManager:
             session.session_id, session.elapsed_seconds(), dict(session.offsets)
         )
         await self._start_recording(session)
+        await self._music_rebind(session)
 
     async def _finalize_after_connection_loss(self, session: ActiveSession) -> None:
         log.error(
@@ -471,10 +509,17 @@ class SessionManager:
                 if task is not None and task is not asyncio.current_task():
                     task.cancel()
 
+            # The connection is about to go away. Telling music first means it
+            # goes quiet and keeps its queue, instead of failing to start the
+            # next track on a disconnected client.
+            await self._music_release(session.guild_id, "recording_stopped")
             await self._teardown_voice(session)
 
             written, warnings = finalize_session_audio(
-                self.config.sessions_dir, session.session_id, self.config.audio_format
+                self.config.sessions_dir,
+                session.session_id,
+                self.config.audio_format,
+                labels=session.labels,
             )
             end_time = utcnow()
             await self.db.set_offsets(session.session_id, session.offsets)
@@ -505,7 +550,9 @@ class SessionManager:
                 session_id=session.session_id,
                 name=session.name,
                 duration_seconds=session.elapsed_seconds(end_time),
-                speakers=sorted(session.labels.get(p.stem, p.stem) for p in written),
+                speakers=sorted(
+                    session.labels.get(track_user_id(p), track_user_id(p)) for p in written
+                ),
                 warnings=warnings,
                 enqueued=enqueued,
             )
@@ -522,6 +569,10 @@ class SessionManager:
             for task in (session.alone_task, session.monitor_task):
                 if task is not None and task is not asyncio.current_task():
                     task.cancel()
+            # The connection is about to go away. Telling music first means it
+            # goes quiet and keeps its queue, instead of failing to start the
+            # next track on a disconnected client.
+            await self._music_release(session.guild_id, "recording_stopped")
             await self._teardown_voice(session)
 
             import shutil
@@ -593,8 +644,9 @@ class SessionManager:
         if any(s.session_id == session_id for s in self.active.values()):
             raise RecordingError("That session is still recording - use `/session stop`.")
 
+        labels: dict[str, str] = json.loads(row.get("participants_json") or "{}")
         written, warnings = finalize_session_audio(
-            self.config.sessions_dir, session_id, self.config.audio_format
+            self.config.sessions_dir, session_id, self.config.audio_format, labels=labels
         )
         if not written:
             raise RecordingError(f"No recoverable audio was found for session `{session_id}`.")
@@ -607,7 +659,6 @@ class SessionManager:
         enqueued = not staging_warnings
         if enqueued:
             await self.db.mark_exported(session_id)
-        labels: dict[str, str] = json.loads(row.get("participants_json") or "{}")
         duration = 0.0
         start = row.get("start_time")
         if start:
@@ -620,7 +671,7 @@ class SessionManager:
             session_id=session_id,
             name=row.get("name") or short_id(session_id),
             duration_seconds=duration,
-            speakers=sorted(labels.get(p.stem, p.stem) for p in written),
+            speakers=sorted(labels.get(track_user_id(p), track_user_id(p)) for p in written),
             warnings=warnings,
             enqueued=enqueued,
         )

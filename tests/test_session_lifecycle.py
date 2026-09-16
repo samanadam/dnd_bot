@@ -257,7 +257,7 @@ async def test_a_recorded_session_is_encoded_and_staged_for_the_transcriber(mana
     metadata = read_metadata(staged)
     assert metadata.participants == {"10": "Thorin", "11": "aylin"}
     assert metadata.language == "tr"
-    assert sorted(p.name for p in staged.glob("*.opus")) == ["10.opus", "11.opus"]
+    assert sorted(p.name for p in staged.glob("*.opus")) == ["Thorin_10.opus", "aylin_11.opus"]
 
     row = await db.get_session(session.session_id)
     assert row["completed"] == 1
@@ -364,7 +364,7 @@ async def test_recover_finalizes_a_session_a_crash_left_open(manager):
     assert sorted(result.speakers) == ["Thorin", "aylin"]
     staged = config.outbox_dir / session.session_id
     assert is_marked(staged, READY_MARKER)
-    assert sorted(p.name for p in staged.glob("*.opus")) == ["10.opus", "11.opus"]
+    assert sorted(p.name for p in staged.glob("*.opus")) == ["Thorin_10.opus", "aylin_11.opus"]
     assert (await db.get_session(session.session_id))["completed"] == 1
 
     # Nothing is left to recover a second time.

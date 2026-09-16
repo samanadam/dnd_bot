@@ -9,7 +9,7 @@ The two halves never talk to each other directly. They exchange directories:
 
     outbox/<session_id>/          recorder -> transcriber
         metadata.json
-        <user_id>.<ext>           one track per speaker
+        <name>_<user_id>.<ext>    one track per speaker (see track_filename)
         READY                     written last
 
     inbox/<session_id>/           transcriber -> recorder
@@ -26,11 +26,18 @@ corrupt half-session.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+# 2: tracks are named `<name>_<user_id>.<ext>` instead of `<user_id>.<ext>`.
+# A build that only knew 1 would take the whole stem as the user id and
+# silently lose every speaker's label and offset, so the bump is deliberate.
+SCHEMA_VERSION = 2
+# Versions this build can still read. A 1 directory has bare `<user_id>`
+# stems, which track_user_id handles unchanged.
+READABLE_SCHEMAS = (1, 2)
 
 METADATA_FILENAME = "metadata.json"
 READY_MARKER = "READY"
@@ -83,7 +90,7 @@ class SessionMetadata:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SessionMetadata:
         schema = payload.get("schema")
-        if schema != SCHEMA_VERSION:
+        if schema not in READABLE_SCHEMAS:
             raise ContractError(
                 f"Unsupported metadata schema {schema!r}; this build understands "
                 f"{SCHEMA_VERSION}. Update both halves to the same version."
@@ -104,6 +111,31 @@ class SessionMetadata:
             prompt_extra=payload.get("prompt_extra") or "",
             audio_format=payload.get("audio_format") or "opus",
         )
+
+
+# -- track names ----------------------------------------------------------
+
+_NAME_MAX = 40
+_UNSAFE = re.compile(r"[^\w-]+")
+
+
+def track_filename(user_id: str, label: str | None, audio_format: str) -> str:
+    """`Thorin_1234.opus` - a readable name first, the join key last.
+
+    The label is only decoration for whoever browses the files; the user id
+    after the final underscore is what ties a track to its metadata. Anything
+    that is not a letter, digit, dash or underscore becomes a dash, so a name
+    with spaces or slashes is still a safe object key.
+    """
+    name = _UNSAFE.sub("-", label or "").strip("-_")[:_NAME_MAX].strip("-_")
+    return f"{name}_{user_id}.{audio_format}" if name else f"{user_id}.{audio_format}"
+
+
+def track_user_id(path: Path | str) -> str:
+    """The user id a track belongs to, for both current and bare-id names."""
+    stem = Path(path).stem
+    _, _, user_id = stem.rpartition("_")
+    return user_id or stem
 
 
 # -- reading and writing --------------------------------------------------
@@ -178,7 +210,7 @@ def validate_outbox(session_dir: Path) -> SessionMetadata:
         raise ContractError(
             f"{directory} contains no .{metadata.audio_format} tracks to transcribe"
         )
-    unknown = [p.stem for p in tracks if p.stem not in metadata.participants]
+    unknown = [track_user_id(p) for p in tracks if track_user_id(p) not in metadata.participants]
     if unknown:
         # Not fatal: a speaker with no label still gets a readable placeholder,
         # rather than the whole session being rejected.
@@ -186,7 +218,7 @@ def validate_outbox(session_dir: Path) -> SessionMetadata:
             metadata,
             participants={
                 **metadata.participants,
-                **{stem: f"User {stem}" for stem in unknown},
+                **{user_id: f"User {user_id}" for user_id in unknown},
             },
         )
     return metadata

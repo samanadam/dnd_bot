@@ -61,6 +61,7 @@ class DiskSink(Sink):
         clock: Callable[[], float] = time.monotonic,
         base_offset: float = 0.0,
         known_offsets: dict[str, float] | None = None,
+        ignore_user_ids: set[str] | None = None,
     ) -> None:
         super().__init__()
         self.raw_dir = Path(raw_dir)
@@ -72,6 +73,10 @@ class DiskSink(Sink):
         # offsets must stay relative to the session start, not to this sink.
         self._base_offset = base_offset
         self._known_offsets = dict(known_offsets or {})
+        # Belt and braces for music playback: Discord does not send a bot its
+        # own transmission back, so this should never fire - but a stray track
+        # file named after the bot would be a confusing way to find that out.
+        self._ignore_user_ids = set(ignore_user_ids or ())
         self._started_at = clock()
         self._files: dict[str, BinaryIO] = {}
         self._offsets: dict[str, float] = {}
@@ -117,6 +122,8 @@ class DiskSink(Sink):
             # cannot be labelled, so it would only pollute an unnamed file.
             return
         user_id = str(getattr(user, "id", user))
+        if user_id in self._ignore_user_ids or getattr(user, "bot", False):
+            return
         handle = self._files.get(user_id)
         now = self._clock()
 
