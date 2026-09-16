@@ -9,7 +9,7 @@ from aiohttp import web
 
 from ..cleanup import directory_size_bytes, free_space_mb
 from . import schemas
-from .keys import BOT, CONFIG, STORAGE_REACHABLE, UPTIME
+from .keys import BOT, CONFIG, UPTIME
 from .middleware import ApiError
 
 log = logging.getLogger(__name__)
@@ -68,7 +68,10 @@ async def stats(request: web.Request) -> web.Response:
             data_bytes=data_bytes,
             low_disk=free_mb < config.disk_warning_threshold_mb,
             storage_backend=config.storage_backend,
-            storage_reachable=request.app.get(STORAGE_REACHABLE),
+            # Read from the bot on every request: the startup probe and each
+            # upload pass keep it current, and a value captured when the app
+            # was built would be stale forever.
+            storage_reachable=getattr(bot, "storage_reachable", None),
             music=music,
         )
     )

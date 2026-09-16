@@ -201,3 +201,106 @@ async def test_music_and_api_wire_together(config, tmp_path: Path):
         assert set(bot.music.sources) == {"youtube"}
     finally:
         await db.close()
+
+
+# -- storage reachability reported to the dashboard ---------------------------
+#
+# The API used to report `storage.reachable` as a constant None: it was set once
+# when the app was built and nothing ever updated it. A dashboard that reads
+# null as falsy then shows storage as "Down" permanently, while R2 works.
+
+
+class ReachableStore:
+    def list_keys(self, prefix):
+        return []
+
+
+class UnreachableStore:
+    def list_keys(self, prefix):
+        raise ConnectionError("no route to host")
+
+
+async def _bot_with_store(config, tmp_path, store):
+    from dataclasses import replace
+
+    config = replace(config, storage_backend="r2", r2_bucket="bucket")
+    config.ensure_dirs()
+    db = Database(tmp_path / "bot.db", MIGRATIONS)
+    await db.connect()
+    bot = DnDBot.__new__(DnDBot)
+    bot.config = config
+    bot.db = db
+    bot.store = store
+    bot.storage_reachable = None
+
+    class Notifier:
+        async def send_dm(self, *args, **kwargs):
+            return None
+
+    bot.notifier = Notifier()
+    return bot, db
+
+
+async def test_a_reachable_bucket_is_reported_reachable(config, tmp_path: Path):
+    bot, db = await _bot_with_store(config, tmp_path, ReachableStore())
+    try:
+        await bot._check_object_storage()
+        assert bot.storage_reachable is True
+    finally:
+        await db.close()
+
+
+async def test_an_unreachable_bucket_is_reported_down(config, tmp_path: Path):
+    bot, db = await _bot_with_store(config, tmp_path, UnreachableStore())
+    try:
+        await bot._check_object_storage()
+        assert bot.storage_reachable is False
+    finally:
+        await db.close()
+
+
+async def test_local_storage_has_nothing_to_reach(config, tmp_path: Path):
+    """No bucket means "not applicable", which must not read as "down"."""
+    config.ensure_dirs()
+    db = Database(tmp_path / "bot.db", MIGRATIONS)
+    await db.connect()
+    try:
+        bot = DnDBot(config, db)
+        await bot._check_object_storage()
+        assert bot.storage_reachable is None
+    finally:
+        await db.close()
+
+
+async def test_stats_reports_the_live_reachability(config, tmp_path: Path):
+    """The value the dashboard sees must be the bot's, not a startup constant."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from dnd_bot.api.server import build_app
+
+    api_config = replace(config, api_enabled=True, api_token="t" * 32)
+    api_config.ensure_dirs()
+
+    async def zero():
+        return 0
+
+    bot = SimpleNamespace(
+        config=api_config,
+        db=SimpleNamespace(pending_count=zero),
+        manager=SimpleNamespace(active={}, sessions_in_guild=lambda g: []),
+        store=None,
+        music=None,
+        is_ready=lambda: True,
+        storage_reachable=True,
+    )
+    headers = {"Authorization": "Bearer " + "t" * 32}
+    async with TestClient(TestServer(build_app(bot))) as client:
+        first = await (await client.get("/api/v1/stats", headers=headers)).json()
+        bot.storage_reachable = False
+        second = await (await client.get("/api/v1/stats", headers=headers)).json()
+
+    assert first["storage"]["reachable"] is True
+    assert second["storage"]["reachable"] is False

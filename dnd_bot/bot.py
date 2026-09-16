@@ -82,6 +82,10 @@ class DnDBot(discord.Bot):
         self._started = False
         self._shutting_down = False
         self._api_stop_timeout = 10.0
+        # What the dashboard shows for storage. None means "nothing to reach"
+        # (local backend) or "not checked yet"; it must never be read as down.
+        # Updated by the startup probe and by every upload pass after it.
+        self.storage_reachable: bool | None = None
 
         self.load_extension("dnd_bot.cogs.session")
         self.load_extension("dnd_bot.cogs.character")
@@ -155,8 +159,10 @@ class DnDBot(discord.Bot):
                 "R2_* settings, then restart."
             )
             log.error("R2 is not reachable: %s", exc)
+            self.storage_reachable = False
             await self.notifier.send_dm(self.config.admin_user_id, message)
             return
+        self.storage_reachable = True
         log.info("R2 bucket %s is reachable", self.config.r2_bucket)
 
     async def _report_recoverable(self) -> None:
@@ -252,7 +258,11 @@ class DnDBot(discord.Bot):
         while True:
             try:
                 await self.uploader.run_once()
+                # A pass that got through proves the bucket answers, so a
+                # transient outage clears itself on the dashboard.
+                self.storage_reachable = True
             except Exception:  # noqa: BLE001 - the loop must outlive any single failure
+                self.storage_reachable = False
                 log.exception("Upload pass failed")
             await asyncio.sleep(self.config.upload_interval_seconds)
 

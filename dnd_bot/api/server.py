@@ -15,7 +15,7 @@ import time
 from aiohttp import web
 
 from .auth import RateLimiter, auth_middleware
-from .keys import BOT, CONFIG, RATE_LIMITER, STORAGE_REACHABLE, UPTIME
+from .keys import BOT, CONFIG, RATE_LIMITER, UPTIME
 from .middleware import (
     body_middleware,
     cors_middleware,
@@ -54,7 +54,6 @@ def build_app(bot) -> web.Application:
     app[BOT] = bot
     app[CONFIG] = bot.config
     app[RATE_LIMITER] = RateLimiter(per_minute=bot.config.api_rate_limit_per_minute)
-    app[STORAGE_REACHABLE] = None
 
     started = time.monotonic()
     app[UPTIME] = lambda: time.monotonic() - started

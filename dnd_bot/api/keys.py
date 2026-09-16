@@ -11,5 +11,4 @@ from aiohttp import web
 BOT = web.AppKey("bot", object)
 CONFIG = web.AppKey("config", object)
 RATE_LIMITER = web.AppKey("rate_limiter", object)
-STORAGE_REACHABLE = web.AppKey("storage_reachable", object)
 UPTIME = web.AppKey("uptime", object)
