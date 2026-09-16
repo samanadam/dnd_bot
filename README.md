@@ -36,9 +36,11 @@ is blocked, while your recordings are transcribed at home.
 7. [Data layout](#data-layout)
 8. [The handover contract](#the-handover-contract)
 9. [Retention, exports and backups](#retention-exports-and-backups)
-10. [Development and tests](#development-and-tests)
-11. [Troubleshooting](#troubleshooting)
-12. [Known limitations](#known-limitations)
+10. [Music](#music)
+11. [The portal API](#the-portal-api)
+12. [Development and tests](#development-and-tests)
+13. [Troubleshooting](#troubleshooting)
+14. [Known limitations](#known-limitations)
 
 ---
 
@@ -153,6 +155,24 @@ Copy `.env.example` to `.env`. Every setting is read from the environment.
 | `TIMEZONE` | `Europe/Istanbul` | Transcript timestamps and the backup schedule. |
 | `DB_BACKUP_KEEP_DAYS` | `14` | Daily `bot.db` copies kept in `/data/backups`. |
 | `LOG_LEVEL` | `INFO` | Everything logs to stdout. |
+| `API_ENABLED` | `false` | The portal API. Turning it on exposes control of recordings. |
+| `API_HOST` | `127.0.0.1` | Bind address. Compose sets `0.0.0.0` inside the container. |
+| `API_PORT` | `8080` | Published to the host's loopback only. |
+| `API_TOKEN` | — | Required when the API is on. At least 32 characters. |
+| `API_CORS_ORIGINS` | — | Exact browser origins, comma-separated. `*` is refused. |
+| `API_RATE_LIMIT_PER_MINUTE` | `60` | Per token. Recording and search writes are capped lower. |
+| `MUSIC_ENABLED` | `false` | Play tracks into the recorded channel. |
+| `MUSIC_R2_PREFIX` | `music` | Where tracks live in the bucket. Needs `STORAGE_BACKEND=r2`. |
+| `MUSIC_DEFAULT_VOLUME` | `0.3` | 1.0 is full volume, 2.0 the ceiling. |
+| `MUSIC_MAX_QUEUE` | `100` | Tracks held, current one included. |
+| `MUSIC_CACHE_MAX_MB` | `2000` | Cache under `DATA_DIR/music`, pruned oldest first. |
+| `MUSIC_RESUME_AFTER_RECONNECT` | `true` | Restart the current track after a voice reconnect. |
+| `MUSIC_YTDLP_ENABLED` | `false` | YouTube streaming. Not in the default image. |
+| `MUSIC_YTDLP_TIMEOUT_SECONDS` | `20` | How long a link resolution may take before it is killed. |
+| `MUSIC_YTDLP_MAX_CONCURRENT` | `2` | Resolutions running at once. This host is also recording. |
+| `MUSIC_STREAM_TTL_SECONDS` | `1800` | Re-resolve a stream URL older than this before playing it. |
+| `MUSIC_MAX_TRACK_SECONDS` | `10800` | Refuse tracks longer than this. |
+| `MUSIC_ALLOW_LIVE` | `false` | Live streams never end, so they block the queue. |
 
 Note there are no Whisper model settings here. This host does not run Whisper;
 those live in the transcriber's configuration.
@@ -368,6 +388,149 @@ needed no edit to `contract.py` at all — only a new transport either end.
 To restore: `docker compose down`, copy the backup over `data/bot.db`,
 `sudo chown 10001:10001 data/bot.db`, `docker compose up -d`.
 
+## Music
+
+The bot can play music into the voice channel it is recording. Discord never
+sends a bot its own audio back, so playback does **not** land in the speaker
+tracks — but a player without headphones will bleed it into theirs.
+
+Off by default. To turn it on:
+
+```
+MUSIC_ENABLED=true
+STORAGE_BACKEND=r2        # tracks live in the bucket you already have
+MUSIC_R2_PREFIX=music
+MUSIC_DEFAULT_VOLUME=0.3  # under the voices
+```
+
+Upload tracks to `music/` in the bucket (`.opus`, `.ogg`, `.mp3`, `.m4a`,
+`.flac`, `.wav`, `.aac`). The bot downloads what it plays into
+`DATA_DIR/music`, then prunes that cache back to `MUSIC_CACHE_MAX_MB`, oldest
+first. It refuses to cache at all when free space is below
+`DISK_WARNING_THRESHOLD_MB`: raw capture needs the disk more than a song does.
+
+Music and recording share the guild's single voice connection. The recorder
+always wins — starting a session takes the connection back, and music re-attaches
+to it once the session is up.
+
+### YouTube (optional)
+
+`MUSIC_YTDLP_ENABLED=true` adds streaming through yt-dlp. It is off by default
+and not in the image, because it breaks whenever YouTube changes, needs frequent
+updating, and is against YouTube's terms of service. If you want it:
+
+```
+docker compose build --build-arg WITH_YTDLP=true
+```
+
+How it is run, and why:
+
+- **As a subprocess**, not in a thread. A timeout therefore actually kills the
+  work instead of abandoning a thread that keeps running.
+- **Bounded**: `MUSIC_YTDLP_MAX_CONCURRENT` resolutions at a time. The same host
+  is recording audio.
+- **Nothing is downloaded.** yt-dlp produces a URL; ffmpeg streams it. The
+  resolver is also forbidden its own cache directory, so it cannot write to the
+  disk the recording depends on.
+- **Stream URLs expire.** YouTube signs them, and honours its own `expire`
+  parameter when it is sooner than `MUSIC_STREAM_TTL_SECONDS`. A track queued
+  half an hour ago is re-resolved before it plays instead of failing on a dead
+  link.
+- **Live streams and very long videos are refused** by default: anything queued
+  behind them would never play.
+- **Failures are classified.** Private, members-only, age-restricted, region
+  blocked, rate limited and "yt-dlp needs updating" each get their own message.
+  yt-dlp's raw output goes to the log only — it quotes URLs and local paths.
+
+Keep it updated. When YouTube changes, the symptom is a resolver error saying so,
+and the fix is rebuilding with a newer `yt-dlp` pin in
+`requirements-optional.txt`.
+
+### What the audio path refuses to do
+
+Both music sources feed ffmpeg, which treats its input as a protocol
+specification, not just a file name. So:
+
+- ffmpeg is given an explicit **protocol whitelist**: a cached file may only be
+  read with `file`, and a stream may only use http/https and TLS. `concat:`,
+  `file://` from a stream, and the rest of ffmpeg's protocol list are
+  unavailable.
+- A URL a caller supplies is checked against a **host allowlist** before yt-dlp
+  sees it, so it cannot be pointed at a cloud metadata endpoint.
+- The URL yt-dlp returns is checked **again** before ffmpeg gets it: https, and
+  every address the host resolves to must be public. An allowlisted page can
+  still hand back an internal address; this is what stops it.
+- Track titles are stripped of control characters and bidirectional overrides
+  before they reach an API response.
+- An R2 track id is only accepted if it appears in the live bucket listing —
+  an allowlist rather than path arithmetic.
+
+## The portal API
+
+An HTTP API for a separate frontend project. Off unless `API_ENABLED=true`.
+
+**It is not a second login for your friends.** One static bearer token grants
+everything, including stopping a live recording, so treat it as admin access:
+
+```
+API_ENABLED=true
+API_TOKEN=            # python -c "import secrets; print(secrets.token_urlsafe(32))"
+API_PORT=8080
+```
+
+The container publishes the port to the host's loopback only. Put a reverse
+proxy in front of it to terminate TLS — the token travels in a header, so it
+must never cross an unencrypted hop:
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+}
+```
+
+Rotating the token means editing `.env` and restarting; there is no revocation
+list.
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/api/v1/health` | Liveness. The only route needing no token. |
+| GET | `/api/v1/stats` | Live sessions, pending transcriptions, disk, storage, music. |
+| GET | `/api/v1/sessions?limit=25` | Finished sessions. |
+| GET | `/api/v1/recording` | What is recording now. |
+| POST | `/api/v1/recording/start` | `{channel_id, name?, text_channel_id?}` |
+| POST | `/api/v1/recording/stop` | `{channel_id}` |
+| POST | `/api/v1/recording/cancel` | `{channel_id}` — **deletes the audio**. |
+| POST | `/api/v1/recording/recover` | `{session_id}` |
+| GET | `/api/v1/music/state` | Now playing, queue, volume, loop. |
+| GET | `/api/v1/music/library?source=r2&q=` | Browse tracks. |
+| POST | `/api/v1/music/search` | `{source, query}` — reaches an external source. |
+| POST | `/api/v1/music/play` | `{source, id, channel_id?, position?}` |
+| POST | `/api/v1/music/{pause,resume,skip,stop}` | Transport. |
+| POST | `/api/v1/music/volume` | `{volume}` — 0 to 2. |
+| POST | `/api/v1/music/loop` | `{mode}` — off, track or queue. |
+| DELETE | `/api/v1/music/queue` · `/queue/{i}` | Clear, or drop one track. |
+| POST | `/api/v1/music/queue/move` | `{from, to}` |
+| POST | `/api/v1/music/{join,leave}` | `{channel_id}` for join. |
+
+Errors are always `{"error": {"code": ..., "message": ...}}`. 401 bad token,
+404 missing, 409 state conflict (already recording, queue full), 413/415 bad
+request shape, 429 rate limited, 502/503/504 a music source failed, is off, or
+timed out.
+
+Every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy:
+no-referrer`, `Cache-Control: no-store` and `X-Frame-Options: DENY`, and the
+server header does not name the stack. `/health` deliberately omits the version:
+it is the one route served without a token.
+
+Responses never carry Discord user ids: speakers appear as display labels and
+counts. `API_CORS_ORIGINS` lists exact browser origins and refuses `*` — though
+the recommended setup has the frontend's own server call this API, so that the
+token never reaches browser JavaScript at all.
+
+The container healthcheck still reads the heartbeat file, not this API: a bot
+that records perfectly with a dead API should not be restarted for it.
+
 ## Development and tests
 
 ```bash
@@ -409,7 +572,12 @@ tests, and builds the image on every push.
   chase them.
 - A session finished while the network is down waits on disk until the next
   upload pass. It is not lost, but it is not in R2 either, so budget the disk.
-- Single guild, no web UI, no live transcription, and no consent-announcement
+- Music and recording share the guild's one voice connection. A voice reconnect
+  mid-session restarts the current track rather than resuming it seamlessly, and
+  music played into a channel is picked up by any player without headphones.
+- The portal API has one shared token and no per-user identity; anyone holding it
+  can stop a live recording. Discord OAuth is not implemented.
+- Single guild, no live transcription, and no consent-announcement
   flow — deliberate non-goals. Access control now covers only the commands that
   reach into past sessions; starting a recording stays open by design.
 

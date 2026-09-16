@@ -23,15 +23,32 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Published to the host's loopback only. The reverse proxy on the host
+    # terminates TLS and is the single way in; the token travels in a header,
+    # so the port must never be exposed unencrypted. Harmless when
+    # API_ENABLED=false - nothing is listening.
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+
+    environment:
+      # Bind inside the container. The code default stays 127.0.0.1 so that
+      # running the bot outside Docker cannot accidentally listen on a public
+      # interface.
+      API_HOST: 0.0.0.0
+
     volumes:
       # Sessions, transcripts, exports, backups and the SQLite database.
       # Audio is bulky - roughly 0.7 GB per hour PER SPEAKER - so point
       # DATA_HOST_DIR at a disk with room rather than wherever the repo sits.
+      # With music enabled this also holds the track cache, up to
+      # MUSIC_CACHE_MAX_MB.
       - ${DATA_HOST_DIR:-./data}:/data
 
     # This half only records: it writes packets to disk and shells out to
     # ffmpeg once per session. Whisper runs elsewhere, which is why these are
     # a fraction of what the combined bot needed - the smallest VPS is enough.
+    # Music playback adds one more ffmpeg process while a track plays, which is
+    # single-digit percent of a core; watch `docker stats` before raising these.
     mem_limit: 1g
     mem_reservation: 256m
     cpus: 1.0

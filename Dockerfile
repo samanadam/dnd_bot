@@ -13,8 +13,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-dev.txt ./
+COPY requirements.txt requirements-dev.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# yt-dlp only, and only on request: it needs updating far more often than
+# anything else in this image, and music over R2 does not need it at all.
+ARG WITH_YTDLP=false
+RUN if [ "$WITH_YTDLP" = "true" ]; then \
+        pip install --no-cache-dir -r requirements-optional.txt; \
+    fi
 
 COPY dnd_bot/ ./dnd_bot/
 COPY migrations/ ./migrations/
@@ -29,6 +36,13 @@ USER dndbot
 
 VOLUME ["/data"]
 
+# The portal API, when API_ENABLED=true. Documentation only - compose publishes
+# this to the host's loopback, where a reverse proxy terminates TLS.
+EXPOSE 8080
+
+# Still the heartbeat file, not the HTTP API: recording liveness is what should
+# decide a restart, and a bot that records perfectly with a dead API must not be
+# killed for it.
 # No model download any more, so the bot is ready in seconds.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
     CMD ["python", "/app/scripts/healthcheck.py"]

@@ -1,0 +1,10 @@
+# Optional extras, deliberately not in the default image.
+#
+# yt-dlp chases YouTube every time it changes, so it needs updating far more
+# often than anything else here and breaks between updates. A stale pin is a
+# resolver that fails on arrival - bump this when playback starts erroring.
+#
+# Build it in only if you set MUSIC_YTDLP_ENABLED=true:
+#
+#     docker compose build --build-arg WITH_YTDLP=true
+yt-dlp==2026.8.19
