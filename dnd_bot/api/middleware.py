@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from aiohttp import web
 
@@ -52,8 +53,19 @@ class ApiError(Exception):
         self.message = message
 
 
+# RecordingError and MusicError carry operator-written text that is safe to
+# show, but some of it interpolates an exception which can quote an absolute
+# path (recorder.py does this when finalization fails). schemas.py promises no
+# response carries a filesystem path, so this is where that promise is kept.
+PATHS = re.compile(r"(?:[A-Za-z]:)?[\/](?:[\w.-]+[\/])+[\w.-]*")
+
+
+def redact_paths(message: str) -> str:
+    return PATHS.sub("<path>", message)
+
+
 def json_error(status: int, code: str, message: str) -> web.Response:
-    return web.json_response(schemas.error(code, message), status=status)
+    return web.json_response(schemas.error(code, redact_paths(message)), status=status)
 
 
 @web.middleware
@@ -109,8 +121,11 @@ async def error_middleware(request: web.Request, handler):
         return json_error(exc.status, code, exc.reason or code.replace("_", " "))
     except TimeoutError:
         return json_error(504, "upstream_timeout", "The upstream source timed out.")
-    except ValueError as exc:
-        return json_error(400, "bad_request", str(exc))
+    except ValueError:
+        # Not ApiError: an unplanned ValueError's text is not written for a
+        # caller and may quote internals. The log keeps the detail.
+        log.warning("Bad request on %s %s", request.method, request.path, exc_info=True)
+        return json_error(400, "bad_request", "The request could not be understood.")
     except Exception as exc:  # noqa: BLE001 - the envelope is the point
         mapped = STATUS_BY_ERROR.get(type(exc).__name__)
         if mapped:

@@ -224,3 +224,23 @@ async def test_the_version_is_available_to_an_authenticated_caller(client):
 async def test_a_server_header_does_not_advertise_the_stack(client):
     response = await client.get("/api/v1/health")
     assert "aiohttp" not in response.headers.get("Server", "")
+
+
+async def test_a_non_ascii_token_is_401_not_500(client):
+    """compare_digest raises TypeError on non-ASCII; that must not read as a 500.
+
+    A 500 tells an attacker their input got further than a wrong token would.
+    """
+    response = await client.get("/api/v1/stats", headers={"Authorization": "Bearer pärola"})
+    assert response.status == 401
+
+
+async def test_an_error_message_never_carries_a_filesystem_path(client, api_config):
+    """schemas.py promises no response carries a path; conflicts pass text through."""
+    from dnd_bot.api.middleware import redact_paths
+
+    assert "/data/sessions/s1/audio" not in redact_paths(
+        "Could not finalize /data/sessions/s1/audio: disk full"
+    )
+    assert "<path>" in redact_paths("failed at /data/sessions/s1/audio")
+    assert redact_paths("Already recording in #Table.") == "Already recording in #Table."

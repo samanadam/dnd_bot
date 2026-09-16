@@ -98,6 +98,11 @@ class R2TrackSource:
             await self._listing(force=True)
             if track_id not in self._cache:
                 raise TrackResolutionError("No such track in the music bucket.")
+        if Path(track_id).suffix.lower() not in AUDIO_SUFFIXES:
+            # browse() filters these out; without the same check here a caller
+            # could name any other object under the prefix and have it fetched
+            # and handed to ffmpeg.
+            raise TrackResolutionError("That object is not a playable audio file.")
 
         target = cached_path(self.config.music_cache_dir, track_id)
         if target.exists() and target.stat().st_size == listing.get(track_id, -1):

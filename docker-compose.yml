@@ -28,7 +28,7 @@ services:
     # so the port must never be exposed unencrypted. Harmless when
     # API_ENABLED=false - nothing is listening.
     ports:
-      - "127.0.0.1:${API_PORT:-8080}:8080"
+      - "127.0.0.1:${API_PORT:-8080}:${API_PORT:-8080}"
 
     environment:
       # Bind inside the container. The code default stays 127.0.0.1 so that

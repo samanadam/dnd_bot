@@ -89,7 +89,13 @@ async def auth_middleware(request: web.Request, handler):
     scheme, _, presented = header.partition(" ")
     if scheme.lower() != "bearer" or not presented:
         return _unauthorized()
-    if not hmac.compare_digest(presented, config.api_token):
+    # compare_digest raises TypeError on non-ASCII str, which would surface as
+    # a 500 and tell an attacker their input reached further than a bad token.
+    try:
+        matches = hmac.compare_digest(presented, config.api_token)
+    except TypeError:
+        return _unauthorized()
+    if not matches:
         return _unauthorized()
 
     request["principal"] = Principal(kind="token")

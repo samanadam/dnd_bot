@@ -166,3 +166,9 @@ def test_build_sources_offers_only_what_is_configured(music_config, store):
     assert set(build_sources(music_config, None)) == set()
     both = build_sources(replace(music_config, music_youtube_enabled=True), store)
     assert set(both) == {"r2", "youtube"}
+
+
+async def test_resolve_refuses_an_object_that_is_not_audio(source):
+    """browse() hides non-audio; resolve() must refuse it, not fetch it for ffmpeg."""
+    with pytest.raises(TrackResolutionError, match="not a playable audio file"):
+        await source.resolve("music/notes.txt")
