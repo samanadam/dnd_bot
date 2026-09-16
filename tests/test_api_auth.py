@@ -244,3 +244,17 @@ async def test_an_error_message_never_carries_a_filesystem_path(client, api_conf
     )
     assert "<path>" in redact_paths("failed at /data/sessions/s1/audio")
     assert redact_paths("Already recording in #Table.") == "Already recording in #Table."
+
+
+def test_redaction_catches_both_path_separators():
+    """A regex written with one separator passed every test and missed the other."""
+    from dnd_bot.api.middleware import redact_paths
+
+    backslash = chr(92)
+    windows = "C:" + backslash + "data" + backslash + "sessions" + backslash + "x.pcm"
+
+    assert "<path>" in redact_paths("failed at /data/sessions/s1/audio")
+    assert "<path>" in redact_paths("failed at " + windows)
+    assert redact_paths("Only https/http links are accepted.") == (
+        "Only https/http links are accepted."
+    )

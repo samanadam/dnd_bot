@@ -57,7 +57,7 @@ class ApiError(Exception):
 # show, but some of it interpolates an exception which can quote an absolute
 # path (recorder.py does this when finalization fails). schemas.py promises no
 # response carries a filesystem path, so this is where that promise is kept.
-PATHS = re.compile(r"(?:[A-Za-z]:)?[\/](?:[\w.-]+[\/])+[\w.-]*")
+PATHS = re.compile(r"(?:[A-Za-z]:)?[\\/](?:[\w.-]+[\\/])+[\w.-]*")
 
 
 def redact_paths(message: str) -> str:

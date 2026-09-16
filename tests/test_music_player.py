@@ -584,3 +584,40 @@ async def test_stopping_a_recording_releases_music(config, tmp_path):
         assert spy.calls == [("detach", 1, "recording_stopped")]
     finally:
         await db.close()
+
+
+# -- the deployment workflow: start in Discord, drive from the dashboard ------
+
+
+async def test_music_plays_during_a_discord_session_without_a_channel_id(manager):
+    """The dashboard never learns a channel id before the session exists.
+
+    Sessions are started with /session start in Discord and music is driven from
+    the portal afterwards, so play must succeed with no channel at all - by
+    borrowing the connection the recording already holds.
+    """
+    recording_client = FakeVoiceClient()
+    manager.bot.manager.sessions = [FakeSession(recording_client)]
+
+    await manager.play(1, track(), channel_id=None)
+
+    assert recording_client.playing
+    assert manager.player(1).owner == "recording"
+    assert manager.player(1).channel_id == 2
+
+
+async def test_without_a_session_play_still_needs_a_channel(manager):
+    """Outside a session there is nothing to borrow, and the message says why."""
+    with pytest.raises(MusicError, match="name one to join"):
+        await manager.play(1, track(), channel_id=None)
+
+
+async def test_the_channel_survives_the_session_ending(manager):
+    """After /session stop the dashboard can reuse the last channel from state."""
+    recording_client = FakeVoiceClient()
+    manager.bot.manager.sessions = [FakeSession(recording_client)]
+    await manager.play(1, track(), channel_id=None)
+
+    await manager.detach(1, reason="recording_stopped")
+
+    assert manager.state_summary(1)["channel_id"] == "2"
