@@ -85,6 +85,41 @@ class Config:
     r2_bucket: str = ""
     upload_interval_seconds: int = 120
 
+    # HTTP API for the portal. Off unless asked for: enabling it puts control of
+    # recordings behind one shared token, so it must be a deliberate choice.
+    api_enabled: bool = False
+    # Loopback by default. The container overrides this to 0.0.0.0 and publishes
+    # the port to 127.0.0.1 on the host, where a reverse proxy terminates TLS.
+    api_host: str = "127.0.0.1"
+    api_port: int = 8080
+    api_token: str = ""
+    # Exact origins the browser may call from. Never a wildcard.
+    api_cors_origins: tuple[str, ...] = ()
+    api_rate_limit_per_minute: int = 60
+
+    music_enabled: bool = False
+    music_r2_prefix: str = "music"
+    music_default_volume: float = 0.3
+    music_max_queue: int = 100
+    music_cache_max_mb: int = 2000
+    # A voice reconnect replaces the client and silently kills playback; this
+    # restarts the current track where it left off.
+    music_resume_after_reconnect: bool = True
+    # yt-dlp breaks often and is off by default. It is also an optional import,
+    # so a missing package is only ever an error for whoever turned this on.
+    music_youtube_enabled: bool = False
+    music_resolve_timeout_seconds: float = 20.0
+    # Resolutions run as subprocesses; more than a couple at once on a 1-core
+    # host starves the recording, and nobody queues that fast by hand.
+    music_ytdlp_max_concurrent: int = 2
+    # A YouTube stream URL is signed and short-lived. Re-resolve before playing
+    # anything older than this rather than handing ffmpeg a dead link.
+    music_stream_ttl_seconds: float = 1800.0
+    # A misclicked 10-hour ambience video should not silently occupy the queue.
+    music_max_track_seconds: float = 10800.0
+    # Live streams never end, so they cannot be queued behind anything.
+    music_allow_live: bool = False
+
     # Tunables that are not part of the documented .env surface but are still
     # kept out of the call sites so tests can override them.
     flush_interval_seconds: float = 5.0
@@ -129,6 +164,15 @@ class Config:
         return self.data_dir / "heartbeat"
 
     @property
+    def music_cache_dir(self) -> Path:
+        """Tracks pulled from object storage, pruned back to a size cap.
+
+        On the same disk as the raw capture, which is the point: the cache must
+        lose to a recording that needs the space, not the other way round.
+        """
+        return self.data_dir / "music"
+
+    @property
     def uses_r2(self) -> bool:
         return self.storage_backend == "r2"
 
@@ -147,6 +191,7 @@ class Config:
             self.backups_dir,
             self.outbox_dir,
             self.inbox_dir,
+            self.music_cache_dir,
         ):
             try:
                 path.mkdir(parents=True, exist_ok=True)
@@ -221,6 +266,43 @@ def load_config() -> Config:
                 "Create an R2 API token with Object Read & Write on your bucket."
             )
 
+    api_enabled = _get_bool("API_ENABLED", False)
+    api_token = _get("API_TOKEN")
+    api_port = _get_int("API_PORT", 8080)
+    if api_enabled:
+        # This token is full control of recordings, including stopping a live
+        # one. Refusing a weak or absent one at load is the only check we get.
+        if not api_token:
+            raise ConfigError(
+                "API_ENABLED=true needs API_TOKEN. Generate one with:\n"
+                '    python -c "import secrets; print(secrets.token_urlsafe(32))"'
+            )
+        if len(api_token) < 32:
+            raise ConfigError("API_TOKEN must be at least 32 characters.")
+        if not 1 <= api_port <= 65535:
+            raise ConfigError(f"API_PORT must be between 1 and 65535, got {api_port}")
+
+    cors_raw = _get("API_CORS_ORIGINS")
+    api_cors_origins = tuple(part.strip() for part in cors_raw.split(",") if part.strip())
+    if "*" in api_cors_origins:
+        raise ConfigError(
+            "API_CORS_ORIGINS cannot be '*'. List the portal's exact origin instead; "
+            "a wildcard would let any page a browser visits drive this bot."
+        )
+
+    music_enabled = _get_bool("MUSIC_ENABLED", False)
+    music_youtube_enabled = _get_bool("MUSIC_YTDLP_ENABLED", False)
+    music_default_volume = _get_float("MUSIC_DEFAULT_VOLUME", 0.3)
+    if not 0.0 <= music_default_volume <= 2.0:
+        raise ConfigError(
+            f"MUSIC_DEFAULT_VOLUME must be between 0 and 2, got {music_default_volume}"
+        )
+    if music_enabled and storage_backend != "r2" and not music_youtube_enabled:
+        raise ConfigError(
+            "MUSIC_ENABLED=true needs a source: either STORAGE_BACKEND=r2 (tracks "
+            "under MUSIC_R2_PREFIX) or MUSIC_YTDLP_ENABLED=true."
+        )
+
     return Config(
         discord_token=_get("DISCORD_TOKEN", required=True),
         guild_id=guild_id,
@@ -243,4 +325,22 @@ def load_config() -> Config:
         r2_secret_access_key=r2_settings["R2_SECRET_ACCESS_KEY"],
         r2_bucket=r2_settings["R2_BUCKET"],
         upload_interval_seconds=_get_int("UPLOAD_INTERVAL_SECONDS", 120),
+        api_enabled=api_enabled,
+        api_host=_get("API_HOST", "127.0.0.1"),
+        api_port=api_port,
+        api_token=api_token,
+        api_cors_origins=api_cors_origins,
+        api_rate_limit_per_minute=_get_int("API_RATE_LIMIT_PER_MINUTE", 60),
+        music_enabled=music_enabled,
+        music_r2_prefix=_get("MUSIC_R2_PREFIX", "music").strip("/"),
+        music_default_volume=music_default_volume,
+        music_max_queue=_get_int("MUSIC_MAX_QUEUE", 100),
+        music_cache_max_mb=_get_int("MUSIC_CACHE_MAX_MB", 2000),
+        music_resume_after_reconnect=_get_bool("MUSIC_RESUME_AFTER_RECONNECT", True),
+        music_youtube_enabled=music_youtube_enabled,
+        music_resolve_timeout_seconds=_get_float("MUSIC_YTDLP_TIMEOUT_SECONDS", 20.0),
+        music_ytdlp_max_concurrent=_get_int("MUSIC_YTDLP_MAX_CONCURRENT", 2),
+        music_stream_ttl_seconds=_get_float("MUSIC_STREAM_TTL_SECONDS", 1800.0),
+        music_max_track_seconds=_get_float("MUSIC_MAX_TRACK_SECONDS", 10800.0),
+        music_allow_live=_get_bool("MUSIC_ALLOW_LIVE", False),
     )

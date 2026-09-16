@@ -103,3 +103,101 @@ async def test_manager_starts_with_no_active_sessions(config, tmp_path: Path):
         assert bot.manager.sessions_in_guild(1) == []
     finally:
         await db.close()
+
+
+# -- HTTP API lifecycle --------------------------------------------------------
+
+
+async def test_no_api_server_when_it_is_disabled(config, tmp_path: Path):
+    config.ensure_dirs()
+    db = Database(tmp_path / "bot.db", MIGRATIONS)
+    await db.connect()
+    try:
+        bot = DnDBot(config, db)
+        assert bot.api is None
+    finally:
+        await db.close()
+
+
+async def test_shutdown_stops_the_api_before_finalizing_sessions(config, tmp_path: Path):
+    """Order matters: stop taking control requests, then flush audio to disk.
+
+    The other way round, a request arriving mid-finalization races the very
+    thing shutdown exists to protect.
+    """
+    config.ensure_dirs()
+    db = Database(tmp_path / "bot.db", MIGRATIONS)
+    await db.connect()
+    order = []
+
+    class SpyApi:
+        async def stop(self):
+            order.append("api")
+
+    try:
+        bot = DnDBot(config, db)
+        bot.api = SpyApi()
+
+        async def shutdown_all():
+            order.append("sessions")
+            return []
+
+        bot.manager.shutdown_all = shutdown_all
+        await bot.shutdown()
+        assert order == ["api", "sessions"]
+    finally:
+        await db.close()
+
+
+async def test_a_wedged_api_cannot_block_shutdown(config, tmp_path: Path):
+    """Audio on disk beats a clean socket close, every time."""
+    import asyncio
+
+    config.ensure_dirs()
+    db = Database(tmp_path / "bot.db", MIGRATIONS)
+    await db.connect()
+    finalized = []
+
+    class WedgedApi:
+        async def stop(self):
+            await asyncio.sleep(3600)
+
+    try:
+        bot = DnDBot(config, db)
+        bot.api = WedgedApi()
+        bot._api_stop_timeout = 0.05
+
+        async def shutdown_all():
+            finalized.append(True)
+            return []
+
+        bot.manager.shutdown_all = shutdown_all
+        await bot.shutdown()
+        assert finalized == [True]
+    finally:
+        await db.close()
+
+
+async def test_music_and_api_wire_together(config, tmp_path: Path):
+    """The player must be reachable from the recorder, which drives its hooks."""
+    from dataclasses import replace
+
+    config = replace(
+        config,
+        api_enabled=True,
+        api_token="t" * 32,
+        music_enabled=True,
+        music_youtube_enabled=True,
+    )
+    config.ensure_dirs()
+    db = Database(tmp_path / "bot.db", MIGRATIONS)
+    await db.connect()
+    try:
+        bot = DnDBot(config, db)
+        assert bot.api is not None
+        assert bot.music is not None
+        assert bot.manager.music is bot.music
+        # No R2 configured here, so YouTube is the only source on offer.
+        assert set(bot.music.sources) == {"youtube"}
+    finally:
+        await db.close()

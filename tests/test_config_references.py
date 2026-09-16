@@ -20,7 +20,13 @@ import pytest
 
 from dnd_bot.config import Config
 
-PACKAGE = Path(__file__).resolve().parent.parent / "dnd_bot"
+ROOT = Path(__file__).resolve().parent.parent
+PACKAGE = ROOT / "dnd_bot"
+ENV_EXAMPLE = ROOT / ".env.example"
+
+# Read by config.py but deliberately absent from .env.example: set by Docker,
+# or read outside Config entirely.
+UNDOCUMENTED_ENV: set[str] = set()
 
 # Names that are legitimately config-shaped but are not Config attributes:
 # locals called `config` that hold something else entirely.
@@ -61,6 +67,38 @@ def test_the_scanner_finds_something_at_all():
         all_referenced |= referenced_attributes(module)
     assert "data_dir" in all_referenced
     assert len(all_referenced) > 5
+
+
+def env_names_read_by_config() -> set[str]:
+    """Every literal env var name config.py reads, via os.environ or a _get*."""
+    tree = ast.parse((PACKAGE / "config.py").read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        first = node.args[0]
+        if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+            continue
+        func = node.func
+        called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        if called in {"_get", "_get_int", "_get_float", "_get_bool", "get"}:
+            names.add(first.value)
+    return names
+
+
+def test_every_setting_is_documented_in_env_example():
+    """A typo'd or undocumented env name is invisible until someone's game night.
+
+    The scan above proves the code agrees with Config; this proves the operator
+    can actually discover the setting.
+    """
+    documented = ENV_EXAMPLE.read_text(encoding="utf-8")
+    missing = sorted(
+        name
+        for name in env_names_read_by_config() - UNDOCUMENTED_ENV
+        if f"\n{name}=" not in documented and f"# {name}=" not in documented
+    )
+    assert not missing, f".env.example does not mention: {', '.join(missing)}"
 
 
 @pytest.mark.parametrize("module", python_modules(), ids=lambda p: p.name)

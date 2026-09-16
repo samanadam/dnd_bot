@@ -12,16 +12,19 @@ from datetime import datetime, timedelta
 
 import discord
 
+from .api.server import ApiServer
 from .backup import backup_database, prune_backups
 from .cleanup import run_cleanup
 from .config import Config, ConfigError, load_config
 from .db import Database
 from .inbox import InboxDelivery, InboxFetcher
+from .music import MusicManager
 from .notify import DiscordNotifier
 from .r2 import OUTBOX_PREFIX, R2Error, R2Store
 from .recorder import SessionManager
 from .recovery import scan_for_recoverable
 from .timeutil import to_iso, utcnow
+from .tracks import build_sources
 from .uploader import OutboxUploader
 
 log = logging.getLogger("dnd_bot")
@@ -61,12 +64,24 @@ class DnDBot(discord.Bot):
         self.uploader = OutboxUploader(self.store, config) if self.store else None
         self.fetcher = InboxFetcher(self.store, config) if self.store else None
 
+        # The portal's HTTP API, and the music player it drives. Both are off
+        # unless configured, and nothing in the recorder may depend on either.
+        self.api = ApiServer(self) if config.api_enabled else None
+        self.music = (
+            MusicManager(self, config, build_sources(config, self.store))
+            if (config.music_enabled)
+            else None
+        )
+        # The recorder reaches for the player on its own voice transitions.
+        self.manager.music = self.music
+
         # NOT `_tasks`: discord.Client uses that name for its own set of
         # internal tasks and calls .add() on it, so shadowing it here
         # crashes the library the moment it schedules anything.
         self._background_tasks: list[asyncio.Task] = []
         self._started = False
         self._shutting_down = False
+        self._api_stop_timeout = 10.0
 
         self.load_extension("dnd_bot.cogs.session")
         self.load_extension("dnd_bot.cogs.character")
@@ -84,6 +99,7 @@ class DnDBot(discord.Bot):
         # below reach the network, so a slow one must not read as unhealthy.
         self._background_tasks.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
 
+        await self._start_api()
         await self._check_object_storage()
         await self._report_recoverable()
 
@@ -99,6 +115,25 @@ class DnDBot(discord.Bot):
             "Cloudflare R2" if self.config.uses_r2 else "the local filesystem",
             await self.db.pending_count(),
         )
+
+    async def _start_api(self) -> None:
+        """Bring up the portal API, or report why not and carry on recording.
+
+        Deliberately non-fatal, like the R2 probe below: a port already in use
+        is no reason to refuse to record a session.
+        """
+        if self.api is None:
+            return
+        try:
+            await self.api.start()
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            log.exception("Could not start the HTTP API")
+            self.api = None
+            await self.notifier.send_dm(
+                self.config.admin_user_id,
+                f"The portal API did not start (`{type(exc).__name__}`). Recording is "
+                "unaffected; the portal will not reach this bot until it is fixed.",
+            )
 
     async def _check_object_storage(self) -> None:
         """Prove R2 is reachable now, rather than at the end of a session.
@@ -180,6 +215,14 @@ class DnDBot(discord.Bot):
         if self._shutting_down:
             return
         self._shutting_down = True
+
+        # First: stop accepting control requests, so nothing arrives mid-flush.
+        # Bounded and suppressed - audio on disk beats a clean socket close.
+        if self.api is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.api.stop(), timeout=self._api_stop_timeout)
+            self.api = None
+
         log.info("Shutting down: finalizing active sessions")
         with contextlib.suppress(Exception):
             results = await self.manager.shutdown_all()
