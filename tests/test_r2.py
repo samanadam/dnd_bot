@@ -24,9 +24,10 @@ class FakeS3:
         self.objects: dict[str, bytes] = {}
         self.uploads: list[str] = []
 
-    def upload_file(self, Filename, Bucket, Key):  # noqa: N803 - boto3 spelling
+    def upload_file(self, Filename, Bucket, Key, ExtraArgs=None):  # noqa: N803 - boto3 spelling
         self.objects[Key] = Path(Filename).read_bytes()
         self.uploads.append(Key)
+        self.extra_args = ExtraArgs
 
     def put_object(self, Bucket, Key, Body=b""):  # noqa: N803
         self.objects[Key] = Body

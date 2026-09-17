@@ -24,7 +24,7 @@ PUBLIC_PATHS = frozenset({"/api/v1/health"})
 
 # Writes that reach a live recording or an external resolver are capped well
 # below the general limit, whatever that is set to.
-TIGHT_LIMIT_PREFIXES = ("/api/v1/recording/", "/api/v1/music/search")
+TIGHT_LIMIT_PREFIXES = ("/api/v1/recording/", "/api/v1/music/search", "/api/v1/music/upload")
 TIGHT_LIMIT_PER_MINUTE = 10
 
 

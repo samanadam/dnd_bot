@@ -125,6 +125,9 @@ class Config:
     music_max_track_seconds: float = 10800.0
     # Live streams never end, so they cannot be queued behind anything.
     music_allow_live: bool = False
+    # Uploads from the portal stream through this host's disk before R2, so
+    # they are capped well below the raw-capture headroom.
+    music_upload_max_mb: int = 150
 
     # Tunables that are not part of the documented .env surface but are still
     # kept out of the call sites so tests can override them.
@@ -245,6 +248,10 @@ def load_config() -> Config:
     except ValueError as exc:
         raise ConfigError("DICE_CHANNEL_ID must be a Discord channel id") from exc
 
+    music_upload_max_mb = _get_int("MUSIC_UPLOAD_MAX_MB", 150)
+    if not 1 <= music_upload_max_mb <= 1000:
+        raise ConfigError("MUSIC_UPLOAD_MAX_MB must be between 1 and 1000.")
+
     ready_timeout_seconds = _get_int("READY_TIMEOUT_SECONDS", 180)
     if ready_timeout_seconds < 30:
         raise ConfigError("READY_TIMEOUT_SECONDS must be at least 30.")
@@ -361,4 +368,5 @@ def load_config() -> Config:
         music_stream_ttl_seconds=_get_float("MUSIC_STREAM_TTL_SECONDS", 1800.0),
         music_max_track_seconds=_get_float("MUSIC_MAX_TRACK_SECONDS", 10800.0),
         music_allow_live=_get_bool("MUSIC_ALLOW_LIVE", False),
+        music_upload_max_mb=music_upload_max_mb,
     )

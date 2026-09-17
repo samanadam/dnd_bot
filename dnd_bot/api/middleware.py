@@ -137,10 +137,14 @@ async def error_middleware(request: web.Request, handler):
         return json_error(500, "internal_error", "Something went wrong.")
 
 
+# Routes that stream a file instead of JSON. Each checks its own content type.
+RAW_BODY_PATHS = frozenset({"/api/v1/music/upload"})
+
+
 @web.middleware
 async def body_middleware(request: web.Request, handler):
     """Refuse anything that is not JSON before a handler has to think about it."""
-    if request.method in {"POST", "PUT", "PATCH"}:
+    if request.method in {"POST", "PUT", "PATCH"} and request.path not in RAW_BODY_PATHS:
         content_type = request.headers.get("Content-Type", "")
         if request.can_read_body and not content_type.startswith("application/json"):
             return json_error(415, "unsupported_media_type", "Send application/json.")

@@ -11,7 +11,8 @@ import logging
 from aiohttp import web
 
 from ..tracks import SourceDisabled
-from .keys import BOT, CONFIG
+from ..uploads import Uploader, UploadError
+from .keys import BOT, CONFIG, UPLOADER
 from .middleware import ApiError, read_json
 
 log = logging.getLogger(__name__)
@@ -187,3 +188,51 @@ async def leave(request: web.Request) -> web.Response:
     """Only ever hangs up a connection music made itself - see MusicManager."""
     await _music(request).detach(_guild_id(request), reason="api_leave")
     return _state(request)
+
+
+# -- library changes from the portal ------------------------------------------
+
+
+def _uploader(request: web.Request) -> Uploader:
+    _music(request)
+    uploader = request.app.get(UPLOADER)
+    if uploader is None:
+        raise ApiError(503, "source_disabled", "Uploads need the R2 music source.")
+    return uploader
+
+
+def _upload_error(exc: UploadError) -> ApiError:
+    return ApiError(exc.status, exc.code, exc.message)
+
+
+@routes.post("/api/v1/music/upload")
+async def upload(request: web.Request) -> web.Response:
+    """Stream one audio file into the bucket. See uploads.py for the checks."""
+    content_type = request.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if not (content_type.startswith("audio/") or content_type == "application/octet-stream"):
+        raise ApiError(415, "unsupported_media_type", "Send the file as audio/* bytes.")
+    folder = request.query.get("folder", "music")
+    filename = request.query.get("filename", "")
+    try:
+        result = await _uploader(request).receive(
+            request.content,
+            folder=folder,
+            filename=filename,
+            content_length=request.content_length,
+        )
+    except UploadError as exc:
+        raise _upload_error(exc) from exc
+    return web.json_response(result, status=201)
+
+
+@routes.post("/api/v1/music/delete")
+async def delete_track(request: web.Request) -> web.Response:
+    payload = await read_json(request)
+    key = payload.get("id")
+    if not isinstance(key, str) or not key or len(key) > 512:
+        raise ApiError(400, "bad_request", "id is required.")
+    try:
+        await _uploader(request).delete(key)
+    except UploadError as exc:
+        raise _upload_error(exc) from exc
+    return web.json_response({"deleted": key})
