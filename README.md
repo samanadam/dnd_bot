@@ -497,6 +497,7 @@ list.
 | GET | `/api/v1/health` | Liveness. The only route needing no token. |
 | GET | `/api/v1/stats` | Live sessions, pending transcriptions, disk, storage, music. |
 | GET | `/api/v1/sessions?limit=25` | Finished sessions. |
+| GET | `/api/v1/sessions/{id}/transcript?offset=0&limit=500` | One page of a delivered transcript: speaker labels, times and text (no user ids). 404 `no_transcript` until it arrives. |
 | GET | `/api/v1/recording` | What is recording now. |
 | POST | `/api/v1/recording/start` | `{channel_id, name?, text_channel_id?}` |
 | POST | `/api/v1/recording/stop` | `{channel_id}` |
@@ -512,6 +513,12 @@ list.
 | DELETE | `/api/v1/music/queue` · `/queue/{i}` | Clear, or drop one track. |
 | POST | `/api/v1/music/queue/move` | `{from, to}` |
 | POST | `/api/v1/music/{join,leave}` | `{channel_id}` for join. |
+| POST | `/api/v1/music/upload?folder=music\|ambience\|sfx&filename=` | Raw audio body (`audio/*`, `Content-Length` required, `MUSIC_UPLOAD_MAX_MB` cap). The name is sanitised, the bytes must match the extension and ffprobe must find audio; existing names are refused (409). One upload at a time. |
+| POST | `/api/v1/music/delete` | `{id}` — removes a listed audio file under the music prefix. |
+| GET | `/api/v1/soundboard` | Ambience (`music/ambience/`) and effects (`music/sfx/`), plus the layers playing now. |
+| POST | `/api/v1/soundboard/play` | `{kind: ambience\|sfx, id, volume?, channel_id?}` — mixed over the music. Ambience loops (3 at most); effects play once (6 at most, oldest replaced). |
+| POST | `/api/v1/soundboard/stop` | `{layer_id}`, `{kind}` or `{}` for everything. |
+| POST | `/api/v1/soundboard/volume` | `{layer_id, volume}` — 0 to 2. |
 | POST | `/api/v1/dice/announce` | `{expression, total, breakdown, label?, channel_id?}` — posts a portal roll to `DICE_CHANNEL_ID` (or the named channel of this server), mentions disabled. |
 
 Errors are always `{"error": {"code": ..., "message": ...}}`. 401 bad token,
