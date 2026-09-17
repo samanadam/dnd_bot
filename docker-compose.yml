@@ -23,6 +23,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Nothing outside /data is ever written (checked with `docker diff` on a
+    # running bot), so a compromised process cannot change its own code.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /home/dndbot:uid=10001,gid=10001,mode=700,size=64m
+    pids_limit: 256
     # Published to the host's loopback only. The reverse proxy on the host
     # terminates TLS and is the single way in; the token travels in a header,
     # so the port must never be exposed unencrypted. Harmless when
