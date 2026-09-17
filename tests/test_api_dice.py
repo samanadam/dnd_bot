@@ -41,9 +41,7 @@ class FakeChannel:
 def make_bot(config, channels, dice_channel_id=CHANNEL):
     config.ensure_dirs()
     return SimpleNamespace(
-        config=replace(
-            config, api_enabled=True, api_token=TOKEN, dice_channel_id=dice_channel_id
-        ),
+        config=replace(config, api_enabled=True, api_token=TOKEN, dice_channel_id=dice_channel_id),
         db=SimpleNamespace(pending_count=lambda: 0),
         manager=SimpleNamespace(active={}, sessions_in_guild=lambda gid: []),
         store=None,

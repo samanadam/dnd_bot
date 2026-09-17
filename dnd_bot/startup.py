@@ -18,9 +18,7 @@ log = logging.getLogger(__name__)
 READY_TIMEOUT_EXIT_CODE = 3
 
 
-async def wait_until_ready(
-    is_ready: Callable[[], bool], timeout: float, poll: float = 1.0
-) -> bool:
+async def wait_until_ready(is_ready: Callable[[], bool], timeout: float, poll: float = 1.0) -> bool:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
