@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime, timedelta
 
 import discord
@@ -87,6 +88,9 @@ class DnDBot(discord.Bot):
         # (local backend) or "not checked yet"; it must never be read as down.
         # Updated by the startup probe and by every upload pass after it.
         self.storage_reachable: bool | None = None
+        # Monotonic time of the last backup-failure DM, so a broken disk does not
+        # message the admin every night forever.
+        self._last_backup_alert: float | None = None
 
         self.load_extension("dnd_bot.cogs.session")
         self.load_extension("dnd_bot.cogs.character")
@@ -298,8 +302,27 @@ class DnDBot(discord.Bot):
                 await asyncio.to_thread(
                     prune_backups, self.config.backups_dir, self.config.db_backup_keep_days
                 )
-            except Exception:  # noqa: BLE001 - a failed backup must not kill the bot
+            except Exception as exc:  # noqa: BLE001 - a failed backup must not kill the bot
                 log.exception("Database backup failed")
+                await self._report_backup_failure(exc)
+
+    BACKUP_ALERT_INTERVAL_SECONDS = 20 * 3600
+
+    def _monotonic(self) -> float:
+        return time.monotonic()
+
+    async def _report_backup_failure(self, exc: BaseException) -> None:
+        now = self._monotonic()
+        last = self._last_backup_alert
+        if last is not None and now - last < DnDBot.BACKUP_ALERT_INTERVAL_SECONDS:
+            return
+        self._last_backup_alert = now
+        # The exception type only: its message can quote the backup path.
+        await self.notifier.send_dm(
+            self.config.admin_user_id,
+            f"The daily database backup failed (`{type(exc).__name__}`). "
+            "Check `docker logs dnd-bot` on the server.",
+        )
 
     def _seconds_until_backup(self, now: datetime | None = None) -> float:
         """Once a day at 05:00 local time - off-peak for a D&D group."""
