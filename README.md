@@ -512,6 +512,7 @@ list.
 | DELETE | `/api/v1/music/queue` · `/queue/{i}` | Clear, or drop one track. |
 | POST | `/api/v1/music/queue/move` | `{from, to}` |
 | POST | `/api/v1/music/{join,leave}` | `{channel_id}` for join. |
+| POST | `/api/v1/dice/announce` | `{expression, total, breakdown, label?, channel_id?}` — posts a portal roll to `DICE_CHANNEL_ID` (or the named channel of this server), mentions disabled. |
 
 Errors are always `{"error": {"code": ..., "message": ...}}`. 401 bad token,
 404 missing, 409 state conflict (already recording, queue full), 413/415 bad

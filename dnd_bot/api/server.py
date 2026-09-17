@@ -72,6 +72,10 @@ def build_app(bot) -> web.Application:
     except ImportError:  # pragma: no cover - present from phase 3 onward
         pass
 
+    from .routes_dice import routes as dice_routes
+
+    app.add_routes(dice_routes)
+
     # No catch-all OPTIONS route: cors_middleware answers preflights before the
     # handler runs, including for paths the router does not know. A catch-all
     # would also swallow unknown paths, turning every 404 into a 405.
