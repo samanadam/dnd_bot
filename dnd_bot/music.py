@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import secrets
 import time
 from collections import deque
 from collections.abc import Callable
@@ -26,11 +27,15 @@ from typing import Any
 
 import discord
 
+from .mixer import Layer, MixerSource
 from .net import ffmpeg_protocol_args, looks_like_a_flag
 
 log = logging.getLogger(__name__)
 
 LOOP_MODES = ("off", "track", "queue")
+LAYER_KINDS = ("ambience", "sfx")
+MAX_AMBIENCE_LAYERS = 3
+MAX_SFX_LAYERS = 6
 
 # Streams drop; tell ffmpeg to reconnect rather than ending the track.
 STREAM_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -105,6 +110,13 @@ class GuildPlayer:
     # was started with, and a stale one is ignored. Without this, every skip
     # advances twice and every "play now" is overtaken by what it interrupted.
     epoch: int = 0
+    # The track-end callback of the music track playing now, so a mixer that
+    # wraps it later reports the end the same way.
+    main_callback: Callable[[Exception | None], None] | None = None
+    # Present while soundboard layers share the connection with the music.
+    mixer: MixerSource | None = None
+    # Looping ambience to bring back after a voice reconnect: (track, volume).
+    ambience: list[tuple[Track, float]] = field(default_factory=list)
 
     def position_seconds(self, now: float) -> float:
         """Elapsed play time, counted off the clock rather than off frames.
@@ -242,12 +254,23 @@ class MusicManager:
         # py-cord. Asking the signature beats catching TypeError: that would
         # also swallow an unrelated TypeError from inside play() and then call
         # it a second time, starting two players on one connection.
-        kwargs = {"signal_type": "music"} if _accepts_signal_type(player.voice_client) else {}
-        try:
-            player.voice_client.play(source, after=callback, **kwargs)
-        except discord.ClientException as exc:
-            raise MusicError(str(exc)) from exc
+        mixer = player.mixer if self._mixer_active(player) else None
+        if mixer is None or not mixer.set_main(source, callback):
+            client = player.voice_client
+            if player.mixer is not None:
+                # A mixer that just ran out of layers can still be winding
+                # down on the player thread; it plays nothing, so stop it.
+                if client.is_playing() or client.is_paused():
+                    with _suppress():
+                        client.stop()
+                player.mixer = None
+            kwargs = {"signal_type": "music"} if _accepts_signal_type(client) else {}
+            try:
+                client.play(source, after=callback, **kwargs)
+            except discord.ClientException as exc:
+                raise MusicError(str(exc)) from exc
 
+        player.main_callback = callback
         player.source = source
         player.current = track
         player.started_at = self._clock() - seek
@@ -262,8 +285,15 @@ class MusicManager:
         is how you get a corrupted queue and no traceback.
         """
         loop = asyncio.get_running_loop()
+        fired = False
 
         def callback(error: Exception | None = None) -> None:
+            nonlocal fired
+            # Once only: when a mixer wraps the track, both the mixer and
+            # py-cord's player can report the same ending.
+            if fired:
+                return
+            fired = True
             # At shutdown the loop can be gone before ffmpeg's player thread
             # notices. Scheduling onto a closed loop raises there, on a thread
             # with nothing to catch it, and leaves a coroutine never awaited.
@@ -312,13 +342,21 @@ class MusicManager:
         """
         player.epoch += 1
         client = player.voice_client
-        if client is not None:
-            with _suppress():
-                client.stop()
-        if player.source is not None:
-            with _suppress():
-                player.source.cleanup()
+        if self._mixer_active(player) and player.mixer.has_layers:
+            # Soundboard layers keep playing; only the music goes.
+            player.mixer.clear_main()
+        else:
+            if client is not None:
+                with _suppress():
+                    client.stop()
+            if player.mixer is not None:
+                player.mixer.cleanup()
+                player.mixer = None
+            if player.source is not None:
+                with _suppress():
+                    player.source.cleanup()
         player.source = None
+        player.main_callback = None
         player.current = None
         player.paused_at = None
 
@@ -340,6 +378,7 @@ class MusicManager:
         finished = player.current
         player.current = None
         player.source = None
+        player.main_callback = None
 
         if finished is not None and player.loop_mode == "track":
             nxt = finished
@@ -350,6 +389,8 @@ class MusicManager:
             nxt = player.queue.popleft() if player.queue else None
 
         if nxt is None:
+            if player.mixer is not None:
+                player.mixer.end_handover()
             return
         try:
             # A queued stream may have expired while it waited its turn; this
@@ -370,7 +411,11 @@ class MusicManager:
         player = self.player(guild_id)
         if player.current is None or player.voice_client is None:
             raise MusicError("Nothing is playing.")
-        player.voice_client.pause()
+        if self._mixer_active(player):
+            # Pausing the client would silence the ambience too.
+            player.mixer.main_paused = True
+        else:
+            player.voice_client.pause()
         player.paused_at = self._clock()
         return player
 
@@ -378,7 +423,12 @@ class MusicManager:
         player = self.player(guild_id)
         if player.current is None or player.voice_client is None:
             raise MusicError("Nothing is paused.")
-        player.voice_client.resume()
+        if self._mixer_active(player):
+            player.mixer.main_paused = False
+            if player.voice_client.is_paused():
+                player.voice_client.resume()
+        else:
+            player.voice_client.resume()
         if player.paused_at is not None:
             player.paused_total += self._clock() - player.paused_at
             player.paused_at = None
@@ -450,6 +500,11 @@ class MusicManager:
         player = self._players.get(guild_id)
         if player is None:
             return
+        if reason == "api_leave":
+            # Leaving on purpose; a later recording should not bring it back.
+            player.ambience.clear()
+        if player.mixer is not None:
+            player.mixer.remove_layers(lambda _layer: True)
         was_playing = player.current
         self._halt(player)
         if was_playing is not None:
@@ -483,21 +538,196 @@ class MusicManager:
             player.channel_id = channel_id
         player.source = None
         player.current = None
+        # The old connection took the mixer with it.
+        if player.mixer is not None:
+            player.mixer.cleanup()
+            player.mixer = None
 
         if current is None and player.queue and self.config.music_resume_after_reconnect:
             current, position = player.queue.popleft(), 0.0
-        if current is None or not self.config.music_resume_after_reconnect:
-            return
+        if current is not None and self.config.music_resume_after_reconnect:
+            try:
+                # Streams seek by range request, cached files by ffmpeg -ss. If
+                # either refuses, the track restarts rather than stopping dead.
+                self._start(player, current, seek=position)
+                log.info("Resumed %s at +%.0fs after a reconnect", current.title, position)
+            except Exception:  # noqa: BLE001 - a lost song must never cost a session
+                log.exception("Could not resume playback in guild %s", guild_id)
+                player.current = None
+                player.source = None
 
+        if not self.config.music_resume_after_reconnect:
+            return
+        for ambience_track, volume in list(player.ambience):
+            try:
+                self._attach_layer(player, ambience_track, "ambience", volume)
+            except Exception:  # noqa: BLE001 - ambience must never cost a session
+                log.exception("Could not bring back ambience in guild %s", guild_id)
+
+    # -- soundboard --------------------------------------------------------
+
+    @staticmethod
+    def _mixer_active(player: GuildPlayer) -> bool:
+        """True while the voice client is playing this player's live mixer."""
+        mixer, client = player.mixer, player.voice_client
+        if mixer is None or mixer.closed or client is None or not client.is_connected():
+            return False
+        if getattr(client, "source", None) is not mixer:
+            return False
+        return bool(client.is_playing() or client.is_paused())
+
+    def _attach_layer(self, player: GuildPlayer, track: Track, kind: str, volume: float) -> Layer:
+        """Put one sound into the mix, creating or wrapping a mixer as needed."""
+        if track.source != "r2" or not track.uri or looks_like_a_flag(track.uri):
+            raise MusicError("Soundboard sounds must be files from the music bucket.")
+        before = ffmpeg_protocol_args(local=True)
+        layer = Layer(
+            id=secrets.token_hex(4),
+            kind=kind,
+            track_id=track.id,
+            title=track.title,
+            source=None,
+            volume=volume,
+        )
+
+        def open_source():
+            # Reads the layer's volume at open time, so a loop keeps a change.
+            return self._source_factory(track.uri, volume=layer.volume, before_options=before)
+
+        layer.source = open_source()
+        layer.reopen = open_source if kind == "ambience" else None
+
+        client = player.voice_client
+        if self._mixer_active(player) and player.mixer.add_layer(layer):
+            return layer
+
+        if player.source is not None and (client.is_playing() or client.is_paused()):
+            # Music is playing on its own: slide a mixer in underneath it
+            # without restarting the track.
+            mixer = MixerSource(main=player.source, on_main_end=player.main_callback)
+            mixer.main_paused = client.is_paused()
+            mixer.add_layer(layer)
+            try:
+                client.source = mixer
+                if client.is_paused():
+                    client.resume()
+            except Exception as exc:  # noqa: BLE001 - surfaced as a 409
+                mixer.remove_layers(lambda _layer: True)
+                raise MusicError("Could not mix that sound in right now.") from exc
+            player.mixer = mixer
+            return layer
+
+        if client.is_playing() or client.is_paused():
+            with _suppress():
+                client.stop()
+        mixer = MixerSource()
+        mixer.add_layer(layer)
+        kwargs = {"signal_type": "music"} if _accepts_signal_type(client) else {}
         try:
-            # Streams seek by range request, cached files by ffmpeg -ss. If
-            # either refuses, the track restarts rather than stopping dead.
-            self._start(player, current, seek=position)
-            log.info("Resumed %s at +%.0fs after a reconnect", current.title, position)
-        except Exception:  # noqa: BLE001 - a lost song must never cost a session
-            log.exception("Could not resume playback in guild %s", guild_id)
-            player.current = None
-            player.source = None
+            client.play(mixer, after=self._mixer_after(player.guild_id), **kwargs)
+        except discord.ClientException as exc:
+            mixer.cleanup()
+            raise MusicError(str(exc)) from exc
+        player.mixer = mixer
+        return layer
+
+    @staticmethod
+    def _mixer_after(guild_id: int):
+        def callback(error: Exception | None = None) -> None:
+            if error is not None:
+                log.error("Soundboard mix failed in guild %s", guild_id, exc_info=error)
+
+        return callback
+
+    async def play_layer(
+        self,
+        guild_id: int,
+        track: Track,
+        *,
+        kind: str,
+        volume: float = 1.0,
+        channel_id: int | None = None,
+    ) -> Layer:
+        if kind not in LAYER_KINDS:
+            raise MusicError("kind must be ambience or sfx.")
+        if not 0.0 <= volume <= 2.0:
+            raise MusicError("volume must be between 0 and 2.")
+        async with self.lock_for(guild_id):
+            player = self.player(guild_id)
+            await self._acquire_voice(guild_id, channel_id)
+
+            layers = player.mixer.snapshot() if self._mixer_active(player) else []
+            same_kind = [layer for layer in layers if layer.kind == kind]
+            if kind == "ambience":
+                if any(layer.track_id == track.id for layer in same_kind):
+                    raise MusicError("That ambience is already playing.")
+                if len(same_kind) >= MAX_AMBIENCE_LAYERS:
+                    raise MusicError(f"At most {MAX_AMBIENCE_LAYERS} ambience sounds at once.")
+            elif len(same_kind) >= MAX_SFX_LAYERS:
+                oldest = same_kind[0]
+                player.mixer.remove_layers(lambda layer: layer is oldest)
+
+            layer = self._attach_layer(player, track, kind, volume)
+            if kind == "ambience":
+                player.ambience.append((track, volume))
+            log.info("Soundboard %s started: %s", kind, track.title)
+            return layer
+
+    def _drop_ambience(self, player: GuildPlayer, removed: list[Layer]) -> None:
+        gone = {layer.track_id for layer in removed if layer.kind == "ambience"}
+        if gone:
+            player.ambience = [(t, v) for t, v in player.ambience if t.id not in gone]
+
+    async def stop_layer(self, guild_id: int, layer_id: str) -> None:
+        player = self.player(guild_id)
+        removed = (
+            player.mixer.remove_layers(lambda layer: layer.id == layer_id)
+            if player.mixer is not None
+            else []
+        )
+        if not removed:
+            raise MusicError("That sound is not playing.")
+        self._drop_ambience(player, removed)
+
+    async def stop_layers(self, guild_id: int, kind: str | None = None) -> int:
+        if kind is not None and kind not in LAYER_KINDS:
+            raise MusicError("kind must be ambience or sfx.")
+        player = self.player(guild_id)
+        removed = (
+            player.mixer.remove_layers(lambda layer: kind is None or layer.kind == kind)
+            if player.mixer is not None
+            else []
+        )
+        if kind in (None, "ambience"):
+            player.ambience.clear()
+        return len(removed)
+
+    async def set_layer_volume(self, guild_id: int, layer_id: str, volume: float) -> None:
+        if not 0.0 <= volume <= 2.0:
+            raise MusicError("volume must be between 0 and 2.")
+        player = self.player(guild_id)
+        layers = player.mixer.snapshot() if player.mixer is not None else []
+        for layer in layers:
+            if layer.id == layer_id:
+                layer.volume = volume
+                with _suppress():
+                    layer.source.volume = volume
+                player.ambience = [
+                    (t, volume if t.id == layer.track_id else v) for t, v in player.ambience
+                ]
+                return
+        raise MusicError("That sound is not playing.")
+
+    def soundboard_state(self, guild_id: int | None = None) -> dict[str, Any]:
+        guild_id = guild_id if guild_id is not None else self.config.guild_id
+        player = self.player(guild_id)
+        layers = player.mixer.snapshot() if self._mixer_active(player) else []
+        client = player.voice_client
+        return {
+            "connected": bool(client is not None and client.is_connected()),
+            "layers": [layer.to_dict() for layer in layers],
+            "limits": {"ambience": MAX_AMBIENCE_LAYERS, "sfx": MAX_SFX_LAYERS},
+        }
 
     # -- state -------------------------------------------------------------
 
@@ -506,12 +736,19 @@ class MusicManager:
         player = self.player(guild_id)
         client = player.voice_client
         connected = bool(client is not None and client.is_connected())
+        if self._mixer_active(player):
+            # The client plays the mix; whether *music* plays is the mixer's say.
+            playing = player.current is not None and not player.mixer.main_paused
+            paused = player.current is not None and player.mixer.main_paused
+        else:
+            playing = bool(connected and client.is_playing())
+            paused = bool(connected and client.is_paused())
         return {
             "connected": connected,
             "channel_id": str(player.channel_id) if player.channel_id else None,
             "owner": player.owner,
-            "playing": bool(connected and client.is_playing()),
-            "paused": bool(connected and client.is_paused()),
+            "playing": playing,
+            "paused": paused,
             "volume": player.volume,
             "loop": player.loop_mode,
             "position_seconds": round(player.position_seconds(self._clock()), 1),

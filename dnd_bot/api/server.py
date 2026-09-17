@@ -14,8 +14,10 @@ import time
 
 from aiohttp import web
 
+from ..transcripts import TranscriptReader
+from ..uploads import Uploader
 from .auth import RateLimiter, auth_middleware
-from .keys import BOT, CONFIG, RATE_LIMITER, UPTIME
+from .keys import BOT, CONFIG, RATE_LIMITER, TRANSCRIPTS, UPLOADER, UPTIME
 from .middleware import (
     body_middleware,
     cors_middleware,
@@ -58,6 +60,16 @@ def build_app(bot) -> web.Application:
     started = time.monotonic()
     app[UPTIME] = lambda: time.monotonic() - started
 
+    # Built here: an aiohttp app is frozen once it starts serving.
+    music = getattr(bot, "music", None)
+    r2_source = getattr(music, "sources", {}).get("r2") if music is not None else None
+    app[UPLOADER] = (
+        Uploader(bot.config, r2_source.store, r2_source)
+        if r2_source is not None and getattr(r2_source, "store", None) is not None
+        else None
+    )
+    app[TRANSCRIPTS] = TranscriptReader(bot.config.sessions_dir)
+
     app.add_routes(health_routes)
     try:
         from .routes_recording import routes as recording_routes
@@ -73,8 +85,12 @@ def build_app(bot) -> web.Application:
         pass
 
     from .routes_dice import routes as dice_routes
+    from .routes_soundboard import routes as soundboard_routes
+    from .routes_transcripts import routes as transcript_routes
 
     app.add_routes(dice_routes)
+    app.add_routes(soundboard_routes)
+    app.add_routes(transcript_routes)
 
     # No catch-all OPTIONS route: cors_middleware answers preflights before the
     # handler runs, including for paths the router does not know. A catch-all
