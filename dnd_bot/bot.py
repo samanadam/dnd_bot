@@ -23,6 +23,7 @@ from .notify import DiscordNotifier
 from .r2 import OUTBOX_PREFIX, R2Error, R2Store
 from .recorder import SessionManager
 from .recovery import scan_for_recoverable
+from .startup import READY_TIMEOUT_EXIT_CODE, start_until_stopped, supervise_ready
 from .timeutil import to_iso, utcnow
 from .tracks import build_sources
 from .uploader import OutboxUploader
@@ -344,13 +345,23 @@ async def run() -> int:
         await db.close()
         return 2
     install_signal_handlers(asyncio.get_running_loop(), bot)
+    watchdog = asyncio.create_task(
+        supervise_ready(bot, config.ready_timeout_seconds, stop=bot.shutdown),
+        name="ready-watchdog",
+    )
     try:
-        await bot.start(config.discord_token)
+        await start_until_stopped(
+            lambda: bot.start(config.discord_token), lambda: bot._shutting_down
+        )
     except discord.LoginFailure:
         log.critical("Discord rejected the token. Check DISCORD_TOKEN.")
         return 2
     finally:
+        if not watchdog.done():
+            watchdog.cancel()
         await bot.shutdown()
+    if watchdog.done() and not watchdog.cancelled() and watchdog.result() is not None:
+        return READY_TIMEOUT_EXIT_CODE
     return 0
 
 

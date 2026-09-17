@@ -96,6 +96,12 @@ class Config:
     # Exact origins the browser may call from. Never a wildcard.
     api_cors_origins: tuple[str, ...] = ()
     api_rate_limit_per_minute: int = 60
+    # Seconds between start and READY before the process gives up and exits so
+    # Docker restarts it. Guild chunking on a small server takes a few seconds.
+    ready_timeout_seconds: int = 180
+    # Text channel for dice rolls sent from the portal. The portal may also name
+    # a channel per roll; either way it must be a channel of the configured guild.
+    dice_channel_id: int | None = None
 
     music_enabled: bool = False
     music_r2_prefix: str = "music"
@@ -233,6 +239,16 @@ def load_config() -> Config:
     admin_raw = os.environ.get("ADMIN_USER_ID", "").strip()
     admin_user_id = int(admin_raw) if admin_raw else None
 
+    dice_raw = os.environ.get("DICE_CHANNEL_ID", "").strip()
+    try:
+        dice_channel_id = int(dice_raw) if dice_raw else None
+    except ValueError as exc:
+        raise ConfigError("DICE_CHANNEL_ID must be a Discord channel id") from exc
+
+    ready_timeout_seconds = _get_int("READY_TIMEOUT_SECONDS", 180)
+    if ready_timeout_seconds < 30:
+        raise ConfigError("READY_TIMEOUT_SECONDS must be at least 30.")
+
     role_raw = os.environ.get("SESSION_ADMIN_ROLE_ID", "").strip()
     session_admin_role_id = int(role_raw) if role_raw else None
 
@@ -331,6 +347,8 @@ def load_config() -> Config:
         api_token=api_token,
         api_cors_origins=api_cors_origins,
         api_rate_limit_per_minute=_get_int("API_RATE_LIMIT_PER_MINUTE", 60),
+        ready_timeout_seconds=ready_timeout_seconds,
+        dice_channel_id=dice_channel_id,
         music_enabled=music_enabled,
         music_r2_prefix=_get("MUSIC_R2_PREFIX", "music").strip("/"),
         music_default_volume=music_default_volume,
