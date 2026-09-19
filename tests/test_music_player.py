@@ -621,3 +621,43 @@ async def test_the_channel_survives_the_session_ending(manager):
     await manager.detach(1, reason="recording_stopped")
 
     assert manager.state_summary(1)["channel_id"] == "2"
+
+
+# -- seeking -----------------------------------------------------------------
+
+
+async def test_seek_restarts_the_track_from_the_offset(manager, voice, clock):
+    await manager.play(1, track(), channel_id=2)
+    first_source = voice.source
+    clock.advance(10.0)
+
+    await manager.seek(1, 95.0)
+
+    assert voice.source is not first_source
+    assert "-ss 95.00" in voice.source.before_options
+    assert manager.player(1).current.id == "t1"
+    assert manager.player(1).position_seconds(clock()) == pytest.approx(95.0)
+    await drain()
+    assert manager.player(1).current is not None, "the interrupted source must not end the track"
+
+
+async def test_seek_keeps_a_paused_track_paused_and_the_queue_intact(manager, voice):
+    await manager.play(1, track("t1"), channel_id=2)
+    await manager.play(1, track("t2"), channel_id=2)
+    await manager.pause(1)
+
+    await manager.seek(1, 30.0)
+
+    assert voice.paused
+    assert [t.id for t in manager.player(1).queue] == ["t2"]
+
+
+async def test_seek_refuses_bad_positions_and_an_idle_player(manager):
+    with pytest.raises(MusicError):
+        await manager.seek(1, 5.0)
+    await manager.play(
+        1, Track("t1", "Tavern", "r2", "/cache/t1.opus", duration_seconds=120.0), channel_id=2
+    )
+    for bad in (-1.0, 120.0, 500.0, 90_000.0):
+        with pytest.raises(MusicError):
+            await manager.seek(1, bad)

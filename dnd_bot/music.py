@@ -43,6 +43,10 @@ STREAM_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max
 FFMPEG_OPTIONS = "-vn -ar 48000 -ac 2"
 
 
+# No track is longer than a day; this only bounds a hostile or mistyped value.
+MAX_SEEK_SECONDS = 86_400.0
+
+
 class MusicError(RuntimeError):
     """User-facing playback failure. Becomes a 409."""
 
@@ -406,6 +410,30 @@ class MusicManager:
         self._halt(player)
         await self.on_track_end(guild_id, None)
         return player
+
+    async def seek(self, guild_id: int, position: float) -> GuildPlayer:
+        """Jump within the current track by restarting it `position` seconds in.
+
+        ffmpeg cannot be told to move a running stream, so this is the same
+        restart-from-an-offset a reconnect already does. A paused track stays
+        paused afterwards, and the queue and any soundboard layers are left
+        alone.
+        """
+        async with self.lock_for(guild_id):
+            player = self.player(guild_id)
+            track = player.current
+            if track is None or player.voice_client is None:
+                raise MusicError("Nothing is playing.")
+            if not 0.0 <= position <= MAX_SEEK_SECONDS:
+                raise MusicError("That position is out of range.")
+            if track.duration_seconds is not None and position >= track.duration_seconds:
+                raise MusicError("That is past the end of the track.")
+            was_paused = player.paused_at is not None
+            self._halt(player)
+            self._start(player, await self._fresh(track), seek=position)
+            if was_paused:
+                await self.pause(guild_id)
+            return player
 
     async def pause(self, guild_id: int) -> GuildPlayer:
         player = self.player(guild_id)

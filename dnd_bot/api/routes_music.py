@@ -112,6 +112,16 @@ async def resume(request: web.Request) -> web.Response:
     return _state(request)
 
 
+@routes.post("/api/v1/music/seek")
+async def seek(request: web.Request) -> web.Response:
+    payload = await read_json(request)
+    position = payload.get("position_seconds")
+    if isinstance(position, bool) or not isinstance(position, int | float):
+        raise ApiError(400, "bad_request", "position_seconds must be a number.")
+    await _music(request).seek(_guild_id(request), float(position))
+    return _state(request)
+
+
 @routes.post("/api/v1/music/skip")
 async def skip(request: web.Request) -> web.Response:
     await _music(request).skip(_guild_id(request))

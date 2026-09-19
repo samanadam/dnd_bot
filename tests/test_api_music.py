@@ -85,6 +85,9 @@ class FakeMusic:
     async def skip(self, guild_id):
         self._record("skip", guild_id)
 
+    async def seek(self, guild_id, position):
+        self._record("seek", guild_id, position)
+
     async def stop(self, guild_id):
         self._record("stop", guild_id)
 
@@ -303,3 +306,25 @@ async def test_every_music_route_is_503_when_music_is_off(config):
 
 async def test_music_control_needs_the_token(client):
     assert (await client.post("/api/v1/music/stop")).status == 401
+
+
+async def test_seek_validates_the_position_and_reaches_the_player(client, music):
+    ok = await client.post("/api/v1/music/seek", json={"position_seconds": 42.5}, headers=AUTH)
+    assert ok.status == 200
+    assert ("seek", (1, 42.5), {}) in music.calls
+    for body in (
+        {},
+        {"position_seconds": "5"},
+        {"position_seconds": True},
+        {"position_seconds": None},
+    ):
+        bad = await client.post("/api/v1/music/seek", json=body, headers=AUTH)
+        assert bad.status == 400
+
+
+async def test_seek_past_the_end_reads_as_a_conflict(client, music):
+    music.error = MusicError("That is past the end of the track.")
+    response = await client.post(
+        "/api/v1/music/seek", json={"position_seconds": 99999}, headers=AUTH
+    )
+    assert response.status == 409
