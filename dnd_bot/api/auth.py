@@ -72,6 +72,9 @@ def limit_for(path: str, general: int) -> tuple[str, int]:
     for prefix in TIGHT_LIMIT_PREFIXES:
         if path.startswith(prefix):
             return "tight", min(TIGHT_LIMIT_PER_MINUTE, general)
+    # Deleting is permanent, so it gets the same ceiling as the other risky calls.
+    if path.startswith("/api/v1/sessions/") and path.endswith("/delete"):
+        return "tight", min(TIGHT_LIMIT_PER_MINUTE, general)
     return "general", general
 
 

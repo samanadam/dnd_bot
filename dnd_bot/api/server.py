@@ -91,6 +91,7 @@ def build_app(bot) -> web.Application:
     from .routes_campaigns import routes as campaign_routes
     from .routes_dice import routes as dice_routes
     from .routes_initiative import routes as initiative_routes
+    from .routes_sessions import routes as session_routes
     from .routes_soundboard import routes as soundboard_routes
     from .routes_transcription import routes as transcription_routes
     from .routes_transcripts import routes as transcript_routes
@@ -98,6 +99,7 @@ def build_app(bot) -> web.Application:
     app.add_routes(campaign_routes)
     app.add_routes(dice_routes)
     app.add_routes(initiative_routes)
+    app.add_routes(session_routes)
     app.add_routes(soundboard_routes)
     app.add_routes(transcript_routes)
     app.add_routes(transcription_routes)

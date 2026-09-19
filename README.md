@@ -522,6 +522,8 @@ list.
 | GET | `/api/v1/stats` | Live sessions, pending transcriptions, disk, storage, music. |
 | GET | `/api/v1/sessions?limit=25&campaign=` | Finished sessions. `campaign` is a campaign id or `unassigned`. |
 | POST | `/api/v1/sessions/{id}/campaign` | `{campaign_id}` (an id, or `null` to unassign). Finished sessions only. |
+| POST | `/api/v1/sessions/{id}/update` | `{name}`: rename a session (1-100 characters). Not while it is recording. |
+| POST | `/api/v1/sessions/{id}/delete` | `{confirm_id}` must equal the session id. Permanently removes the audio, transcript, export, staged and bucket copies, search entries and database rows. Refused (409) while recording or while the transcriber is working on it. The transcriber's own archive is not touched. Rate limited like recording calls. |
 | GET | `/api/v1/transcripts/search?q=&campaign=&limit=` | Full-text search across delivered transcripts, as they are read (after the campaign's corrections). Words only: operators are ignored. Returns `results` and `still_indexing`. |
 | GET | `/api/v1/transcription` | Sessions waiting for a transcript: `uploading` (still on the bot), `waiting` (in the bucket or with the transcriber) or `transcribing`, with `stalled` after 48 hours. |
 | POST | `/api/v1/transcription/sync` | Runs one upload pass and one download pass now. Delivery stays with the bot's own loop. |
