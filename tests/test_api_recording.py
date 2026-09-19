@@ -41,6 +41,7 @@ class FakeManager:
     def __init__(self):
         self.active = {}
         self.calls = []
+        self.campaign_ids = []
         self.start_error: Exception | None = None
         self.stop_result: StopResult | None = None
         self.cancelled: str | None = None
@@ -49,8 +50,9 @@ class FakeManager:
     def sessions_in_guild(self, guild_id):
         return list(self.active.values())
 
-    async def start(self, *, channel, text_channel_id, invoker, name):
+    async def start(self, *, channel, text_channel_id, invoker, name, campaign_id=None):
         self.calls.append(("start", channel.id, text_channel_id, name, invoker.id))
+        self.campaign_ids.append(campaign_id)
         if self.start_error:
             raise self.start_error
         session = FakeSession(channel.id)
@@ -250,3 +252,22 @@ async def test_no_recording_response_carries_a_user_id(client, manager):
     text = await (await client.get("/api/v1/recording", headers=AUTH)).text()
     assert '"10"' not in text
     assert "started_by_user_id" not in text
+
+
+async def test_start_passes_the_campaign_choice_to_the_manager(client, manager):
+    response = await client.post(
+        "/api/v1/recording/start",
+        json={"channel_id": "2", "campaign_id": "abc123abc123"},
+        headers=AUTH,
+    )
+    assert response.status == 201
+    assert manager.campaign_ids == ["abc123abc123"]
+    body = await response.json()
+    assert body["campaign_id"] is None and body["campaign_name"] is None
+
+
+async def test_start_rejects_a_non_string_campaign(client):
+    response = await client.post(
+        "/api/v1/recording/start", json={"channel_id": "2", "campaign_id": 5}, headers=AUTH
+    )
+    assert response.status == 400

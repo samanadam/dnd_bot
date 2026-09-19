@@ -15,11 +15,13 @@ from __future__ import annotations
 import json
 import re
 from collections import OrderedDict
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from . import paths
+from .campaigns import apply_corrections
 
 MAX_SEGMENT_CHARS = 5000
 MAX_LABEL_CHARS = 100
@@ -38,6 +40,10 @@ class TranscriptMissing(LookupError):
 class Transcript:
     meta: dict[str, Any]
     segments: list[dict[str, Any]]
+    # Discord user id of each segment's speaker, parallel to `segments`. Kept
+    # off the segments themselves so an id can never reach a response by way of
+    # a spread; empty for transcripts parsed from Markdown, which has none.
+    user_ids: list[str] = field(default_factory=list)
 
 
 def _text(value: object, limit: int) -> str:
@@ -59,6 +65,7 @@ def _clock(seconds: float | None) -> str | None:
 
 def from_json(raw: dict[str, Any]) -> Transcript:
     segments = []
+    user_ids = []
     for item in raw.get("segments") or []:
         if not isinstance(item, dict):
             continue
@@ -66,6 +73,7 @@ def from_json(raw: dict[str, Any]) -> Transcript:
         if not text:
             continue
         start = _seconds(item.get("start"))
+        user_ids.append(_text(item.get("user_id"), 40))
         segments.append(
             {
                 "speaker": _text(item.get("speaker"), MAX_LABEL_CHARS) or "Unknown",
@@ -86,7 +94,7 @@ def from_json(raw: dict[str, Any]) -> Transcript:
             _text(warning, 300) for warning in (raw.get("warnings") or [])[:20] if warning
         ],
     }
-    return Transcript(meta, segments)
+    return Transcript(meta, segments, user_ids)
 
 
 def from_markdown(text: str) -> Transcript:
@@ -140,8 +148,43 @@ class TranscriptReader:
             or paths.transcript_md_path(self.sessions_root, session_id).is_file()
         )
 
-    def read(self, session_id: str) -> Transcript:
-        """Blocking: run it in a thread."""
+    def read(
+        self,
+        session_id: str,
+        *,
+        relabel: Mapping[str, str] | None = None,
+        corrections: Sequence[tuple[str, str]] = (),
+    ) -> Transcript:
+        """Blocking: run it in a thread.
+
+        The cache holds the transcript as the transcriber wrote it. A campaign's
+        relabel map and word corrections are applied on the way out, on a copy,
+        and never stored - so one campaign's view cannot leak into another's.
+        """
+        transcript = self._load(session_id)
+        if not relabel and not corrections:
+            return transcript
+        segments = []
+        for index, segment in enumerate(transcript.segments):
+            user_id = transcript.user_ids[index] if index < len(transcript.user_ids) else ""
+            segments.append(
+                {
+                    **segment,
+                    "speaker": (relabel or {}).get(user_id, segment["speaker"]),
+                    "text": apply_corrections(segment["text"], corrections),
+                }
+            )
+        return Transcript(
+            {
+                **transcript.meta,
+                "speakers": sorted({segment["speaker"] for segment in segments}),
+                "word_count": sum(len(segment["text"].split()) for segment in segments),
+            },
+            segments,
+            list(transcript.user_ids),
+        )
+
+    def _load(self, session_id: str) -> Transcript:
         json_path = paths.transcript_json_path(self.sessions_root, session_id)
         md_path = paths.transcript_md_path(self.sessions_root, session_id)
         path = json_path if json_path.is_file() else md_path

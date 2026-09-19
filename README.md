@@ -85,7 +85,7 @@ members with **Manage Guild** or the role named by `SESSION_ADMIN_ROLE_ID`.
 
 | Command | What it does |
 | --- | --- |
-| `/session start [name]` | Joins your current voice channel and starts recording. |
+| `/session start [name] [campaign]` | Joins your current voice channel and starts recording. The campaign defaults to the one mapped to the channel. |
 | `/session stop` | Stops the session, encodes the audio and stages it for the transcriber. |
 | `/session status` | The active session, or what is waiting for a transcript. |
 | `/session cancel` | Stops and **discards** the session, deleting its audio. |
@@ -93,15 +93,34 @@ members with **Manage Guild** or the role named by `SESSION_ADMIN_ROLE_ID`.
 | `/session transcript <id>` 🔒 | Re-posts a past session's transcript. |
 | `/session recover <id>` 🔒 | Finalizes and stages a session left open by a crash. |
 | `/session export <id>` 🔒 | Zips a session's transcript and any audio still here. |
-| `/character set <user> <name>` | Maps a Discord user to a character name. 🔒 for anyone but yourself. |
-| `/character clear <user>` | Removes a mapping. 🔒 for anyone but yourself. |
-| `/character list` | Shows all mappings. |
+| `/character set <user> <name> [campaign]` | Maps a Discord user to a character name, globally or only in one campaign. 🔒 for anyone but yourself. |
+| `/character clear <user> [campaign]` | Removes a mapping. 🔒 for anyone but yourself. |
+| `/character list [campaign]` | Shows all mappings, or one campaign's. |
+| `/init <total> [name]` | Tells the DM your initiative. You roll the dice; the number goes to the DM tracker and is never posted to the channel. |
+| `/campaign list` | Campaigns, their voice channels and session counts. |
+| `/campaign create <name> [voice_channel]` 🔒 | Creates a campaign, optionally owning a voice channel. |
+| `/campaign channel <campaign> [voice_channel]` 🔒 | Sets or clears a campaign's voice channel. |
 
 **Speaker labels** resolve as character name (`/character set`) → server nickname
 → username, and are frozen into `metadata.json` when the session is staged. That
 is what lets the transcriber work with no database and no Discord access — and
 why running `/character set` for every player before your first session is the
 single biggest thing you can do for transcript quality.
+
+### Campaigns
+
+Several campaigns can share one server. A session picks its campaign in this
+order: the one named at `/session start` (or by the portal), else the campaign
+mapped to the voice channel, else none. A campaign has its own character names
+(laid over the global ones), a list of names for Whisper to expect, and a list
+of "heard → correct" fixes.
+
+A session with no campaign is transcribed without a glossary and stays
+*unassigned*. It can be assigned, or moved to another campaign, at any time,
+even after transcription. Nothing on disk changes when that happens: speaker
+labels are re-resolved from the new campaign's character names, and its
+corrections are applied when the transcript is read. The Discord-posted
+transcript file is not rewritten.
 
 ## Setup: creating the Discord bot
 
@@ -367,6 +386,11 @@ harmless rather than a corrupt half-session.
 
 **Change `contract.py` in both repositories in the same commit.**
 
+`metadata.json` also carries an optional `campaign_id` and `campaign_name`. They
+were added without a schema bump because nothing else about the format changed:
+an older transcriber ignores them, and an older recorder omits them. The
+campaign's names for Whisper travel in the existing `prompt_extra`.
+
 R2 does not change any of this. Object keys mirror the directory layout
 (`outbox/<session_id>/READY`, `inbox/<session_id>/DONE`) and the marker object
 is still written last, so a session mid-upload stays invisible to the other side
@@ -496,10 +520,22 @@ list.
 |---|---|---|
 | GET | `/api/v1/health` | Liveness. The only route needing no token. |
 | GET | `/api/v1/stats` | Live sessions, pending transcriptions, disk, storage, music. |
-| GET | `/api/v1/sessions?limit=25` | Finished sessions. |
+| GET | `/api/v1/sessions?limit=25&campaign=` | Finished sessions. `campaign` is a campaign id or `unassigned`. |
+| POST | `/api/v1/sessions/{id}/campaign` | `{campaign_id}` (an id, or `null` to unassign). Finished sessions only. |
+| GET | `/api/v1/transcripts/search?q=&campaign=&limit=` | Full-text search across delivered transcripts, as they are read (after the campaign's corrections). Words only: operators are ignored. Returns `results` and `still_indexing`. |
+| GET | `/api/v1/transcription` | Sessions waiting for a transcript: `uploading` (still on the bot), `waiting` (in the bucket or with the transcriber) or `transcribing`, with `stalled` after 48 hours. |
+| POST | `/api/v1/transcription/sync` | Runs one upload pass and one download pass now. Delivery stays with the bot's own loop. |
+| GET | `/api/v1/initiative` | Totals players sent with `/init`: `{id, label, value, at}`, never a user id. |
+| POST | `/api/v1/initiative/clear` | `{id}` drops one, `{}` drops all. |
+| GET | `/api/v1/campaigns?archived=1` | Campaigns. |
+| POST | `/api/v1/campaigns` | `{name, channel_id?, language?}` |
+| GET | `/api/v1/campaigns/{id}` | Campaign with its names, corrections and characters (labels only, no user ids). |
+| POST | `/api/v1/campaigns/{id}/update` | Any of `{name, channel_id, language, archived}`. |
+| POST | `/api/v1/campaigns/{id}/terms` | `{terms: string[]}` replaces the list Whisper is primed with. |
+| POST | `/api/v1/campaigns/{id}/corrections` | `{corrections: {heard, correct}[]}` replaces the fix list. |
 | GET | `/api/v1/sessions/{id}/transcript?offset=0&limit=500` | One page of a delivered transcript: speaker labels, times and text (no user ids). 404 `no_transcript` until it arrives. |
 | GET | `/api/v1/recording` | What is recording now. |
-| POST | `/api/v1/recording/start` | `{channel_id, name?, text_channel_id?}` |
+| POST | `/api/v1/recording/start` | `{channel_id, name?, text_channel_id?, campaign_id?}` |
 | POST | `/api/v1/recording/stop` | `{channel_id}` |
 | POST | `/api/v1/recording/cancel` | `{channel_id}` — **deletes the audio**. |
 | POST | `/api/v1/recording/recover` | `{session_id}` |
@@ -509,6 +545,7 @@ list.
 | POST | `/api/v1/music/play` | `{source, id, channel_id?, position?}` |
 | POST | `/api/v1/music/{pause,resume,skip,stop}` | Transport. |
 | POST | `/api/v1/music/volume` | `{volume}` — 0 to 2. |
+| POST | `/api/v1/music/seek` | `{position_seconds}` — restarts the current track from that offset; a paused track stays paused. |
 | POST | `/api/v1/music/loop` | `{mode}` — off, track or queue. |
 | DELETE | `/api/v1/music/queue` · `/queue/{i}` | Clear, or drop one track. |
 | POST | `/api/v1/music/queue/move` | `{from, to}` |

@@ -84,11 +84,16 @@ async def start(request: web.Request) -> web.Response:
     if name is not None and not isinstance(name, str):
         raise ApiError(400, "bad_request", "name must be a string.")
 
+    campaign_id = payload.get("campaign_id")
+    if campaign_id is not None and not isinstance(campaign_id, str):
+        raise ApiError(400, "bad_request", "campaign_id must be a string.")
+
     session = await request.app[BOT].manager.start(
         channel=channel,
         text_channel_id=int(text_channel_id) if text_channel_id else None,
         invoker=_invoker(request, channel.guild),
         name=name,
+        campaign_id=campaign_id,
     )
     log.info("Recording %s started via the API", session.session_id)
     return web.json_response(schemas.active_session(session), status=201)

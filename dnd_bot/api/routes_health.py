@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from aiohttp import web
 
@@ -17,6 +18,7 @@ log = logging.getLogger(__name__)
 routes = web.RouteTableDef()
 
 MAX_SESSION_LIMIT = 200
+CAMPAIGN_ID = re.compile(r"^[a-f0-9]{12}$")
 
 
 @routes.get("/api/v1/health")
@@ -87,5 +89,9 @@ async def sessions(request: web.Request) -> web.Response:
     if not 1 <= limit <= MAX_SESSION_LIMIT:
         raise ApiError(400, "bad_request", f"limit must be between 1 and {MAX_SESSION_LIMIT}.")
 
-    rows = await request.app[BOT].db.list_sessions(limit=limit)
+    campaign = request.query.get("campaign")
+    if campaign is not None and campaign != "unassigned" and not CAMPAIGN_ID.match(campaign):
+        raise ApiError(400, "bad_request", "campaign must be a campaign id or 'unassigned'.")
+
+    rows = await request.app[BOT].db.list_sessions(limit=limit, campaign=campaign)
     return web.json_response([schemas.session_summary(row) for row in rows])

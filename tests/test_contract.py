@@ -181,3 +181,28 @@ def test_an_unlabelled_speaker_gets_a_placeholder_rather_than_a_failure(tmp_path
     metadata = validate_outbox(directory)
     assert metadata.participants["99"] == "User 99"
     assert metadata.participants["10"] == "Thorin"
+
+
+def test_campaign_fields_round_trip():
+    meta = SessionMetadata(
+        session_id="s",
+        name="n",
+        start_time_utc="2026-05-01T18:00:00+00:00",
+        campaign_id="abc123",
+        campaign_name="Strahd",
+    )
+    restored = SessionMetadata.from_dict(meta.to_dict())
+    assert restored.campaign_id == "abc123"
+    assert restored.campaign_name == "Strahd"
+
+
+def test_old_metadata_without_campaign_still_reads():
+    payload = {
+        "schema": 2,
+        "session_id": "s",
+        "name": "n",
+        "start_time_utc": "2026-05-01T18:00:00+00:00",
+    }
+    meta = SessionMetadata.from_dict(payload)
+    assert meta.campaign_id is None
+    assert meta.campaign_name is None

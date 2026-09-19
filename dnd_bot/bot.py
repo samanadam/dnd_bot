@@ -94,6 +94,8 @@ class DnDBot(discord.Bot):
 
         self.load_extension("dnd_bot.cogs.session")
         self.load_extension("dnd_bot.cogs.character")
+        self.load_extension("dnd_bot.cogs.campaign")
+        self.load_extension("dnd_bot.cogs.initiative")
 
     # -- lifecycle ---------------------------------------------------------
 

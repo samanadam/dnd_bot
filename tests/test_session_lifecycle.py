@@ -385,3 +385,87 @@ async def test_recover_refuses_an_unknown_session(manager):
     mgr, _, _ = manager
     with pytest.raises(RecordingError, match="No session found"):
         await mgr.recover("does-not-exist")
+
+
+# -- campaigns ----------------------------------------------------------------
+
+
+async def test_a_mapped_channel_tags_the_session_and_uses_campaign_characters(manager):
+    mgr, db, _ = manager
+    campaign = await db.create_campaign(name="Strahd", channel_id=2, language="en")
+    await db.set_character(10, "Global Thorin")
+    await db.set_campaign_character(campaign["id"], 10, "Thorin of Strahd")
+    channel = FakeChannel([THORIN, ELENYA])
+
+    session = await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name=None)
+
+    assert session.campaign_id == campaign["id"]
+    assert session.campaign_name == "Strahd"
+    assert session.labels == {"10": "Thorin of Strahd", "11": "aylin"}
+    row = await db.get_session(session.session_id)
+    assert row["campaign_id"] == campaign["id"]
+    assert row["language"] == "en"
+    assert row["base_labels_json"] == '{"10": "Thorin", "11": "aylin"}'
+    await mgr.stop(1, 2)
+
+
+async def test_an_explicit_campaign_overrides_the_channel_mapping(manager):
+    mgr, db, _ = manager
+    await db.create_campaign(name="Channel one", channel_id=2)
+    other = await db.create_campaign(name="Other")
+    channel = FakeChannel([THORIN])
+
+    session = await mgr.start(
+        channel=channel, text_channel_id=3, invoker=THORIN, name=None, campaign_id=other["id"]
+    )
+
+    assert session.campaign_id == other["id"]
+    await mgr.stop(1, 2)
+
+
+async def test_an_unmapped_channel_leaves_the_session_unassigned(manager):
+    mgr, db, config = manager
+    channel = FakeChannel([THORIN])
+
+    session = await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name=None)
+
+    assert session.campaign_id is None
+    row = await db.get_session(session.session_id)
+    assert row["campaign_id"] is None
+    assert row["language"] == config.transcribe_language
+    await mgr.stop(1, 2)
+
+
+@needs_ffmpeg
+async def test_a_campaign_session_is_staged_with_its_name_hints(manager):
+    mgr, db, config = manager
+    campaign = await db.create_campaign(name="Strahd", channel_id=2)
+    await db.replace_terms(campaign["id"], ["Eldrin", "Barovia"])
+    channel = FakeChannel([THORIN])
+    session = await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name=None)
+    channel.voice_client.speak(THORIN, 0.5)
+
+    result = await mgr.stop(1, 2)
+
+    assert result is not None and result.enqueued, result.warnings if result else None
+    metadata = read_metadata(config.outbox_dir / session.session_id)
+    assert metadata.campaign_id == campaign["id"]
+    assert metadata.campaign_name == "Strahd"
+    assert metadata.prompt_extra.startswith("Names: Eldrin, Barovia")
+
+
+@pytest.mark.parametrize("archived", [False, True])
+async def test_an_unknown_or_archived_campaign_is_refused_before_joining(manager, archived):
+    mgr, db, _ = manager
+    campaign_id = "0" * 12
+    if archived:
+        campaign = await db.create_campaign(name="Old")
+        await db.update_campaign(campaign["id"], archived=1)
+        campaign_id = campaign["id"]
+    channel = FakeChannel([THORIN])
+
+    with pytest.raises(RecordingError, match="campaign"):
+        await mgr.start(
+            channel=channel, text_channel_id=3, invoker=THORIN, name=None, campaign_id=campaign_id
+        )
+    assert not channel.voice_client.recording

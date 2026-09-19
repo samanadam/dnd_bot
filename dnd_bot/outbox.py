@@ -38,6 +38,8 @@ def metadata_from_session(
     timezone_name: str,
     prompt_extra: str = "",
     audio_format: str = "opus",
+    campaign_id: str | None = None,
+    campaign_name: str | None = None,
 ) -> SessionMetadata:
     """Freeze everything the transcriber will need into a portable record."""
     return SessionMetadata(
@@ -55,6 +57,8 @@ def metadata_from_session(
         language=session.get("language") or "tr",
         prompt_extra=prompt_extra,
         audio_format=audio_format,
+        campaign_id=campaign_id,
+        campaign_name=campaign_name,
     )
 
 
@@ -66,6 +70,8 @@ def publish(
     audio_format: str,
     timezone_name: str,
     prompt_extra: str = "",
+    campaign_id: str | None = None,
+    campaign_name: str | None = None,
     move: bool = True,
 ) -> Path:
     """Stage a finished session in the outbox and mark it READY.
@@ -102,6 +108,8 @@ def publish(
             timezone_name=timezone_name,
             prompt_extra=prompt_extra,
             audio_format=audio_format,
+            campaign_id=campaign_id,
+            campaign_name=campaign_name,
         ),
     )
     # Last write: until this exists, a collector ignores the directory, so a

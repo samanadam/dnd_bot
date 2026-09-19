@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 
 from aiohttp import web
@@ -40,8 +41,14 @@ async def transcript(request: web.Request) -> web.Response:
         raise ApiError(404, "not_found", "No such session.")
 
     reader: TranscriptReader = request.app[TRANSCRIPTS]
+    db = request.app[BOT].db
+    relabel = json.loads(row.get("relabel_json") or "{}")
+    campaign_id = row.get("campaign_id")
+    corrections = await db.campaign_corrections(campaign_id) if campaign_id else []
     try:
-        parsed = await asyncio.to_thread(reader.read, session_id)
+        parsed = await asyncio.to_thread(
+            reader.read, session_id, relabel=relabel or None, corrections=corrections
+        )
     except TranscriptMissing as exc:
         raise ApiError(404, "no_transcript", "This session has no transcript yet.") from exc
 
@@ -53,6 +60,8 @@ async def transcript(request: web.Request) -> web.Response:
                 "name": row["name"],
                 "started_at": row["start_time"],
                 "ended_at": row["end_time"],
+                "campaign_id": campaign_id,
+                "campaign_name": row.get("campaign_name"),
                 **parsed.meta,
                 "warnings": [redact_paths(w) for w in parsed.meta["warnings"]],
             },

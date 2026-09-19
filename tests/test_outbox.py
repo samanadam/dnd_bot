@@ -156,3 +156,22 @@ def test_metadata_json_is_readable_by_a_plain_json_parser(tmp_path: Path):
     payload = json.loads((target / "metadata.json").read_text(encoding="utf-8"))
     assert payload["schema"] == 2
     assert payload["audio_format"] == "opus"
+
+
+def test_publish_carries_the_campaign_into_the_metadata(tmp_path: Path):
+    sessions_root, outbox_root = tmp_path / "sessions", tmp_path / "outbox"
+    seed_audio(sessions_root, "s1")
+
+    target = publish(
+        SESSION,
+        sessions_root=sessions_root,
+        outbox_root=outbox_root,
+        audio_format="opus",
+        timezone_name="UTC",
+        campaign_id="abc123",
+        campaign_name="Strahd",
+    )
+
+    metadata = read_metadata(target)
+    assert metadata.campaign_id == "abc123"
+    assert metadata.campaign_name == "Strahd"

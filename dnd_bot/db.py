@@ -10,12 +10,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
+import sqlite3
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from .campaigns import relabel_map
+from .initiative import MAX_AGE_HOURS as INITIATIVE_MAX_AGE_HOURS
+from .initiative import MAX_PENDING as MAX_INITIATIVE
 from .timeutil import to_iso, utcnow
 
 log = logging.getLogger(__name__)
@@ -49,6 +55,14 @@ def discover_migrations(directory: Path) -> list[Migration]:
         )
     migrations.sort(key=lambda m: m.version)
     return migrations
+
+
+class CampaignConflict(ValueError):
+    """A campaign name or voice channel is already taken."""
+
+
+_CAMPAIGN_FIELDS = frozenset({"name", "channel_id", "language", "archived"})
+_CAMPAIGN_TAKEN = "A campaign with that name, or one already using that voice channel, exists."
 
 
 class Database:
@@ -124,13 +138,16 @@ class Database:
         # this half does not transcribe. The transcriber records it, and the
         # column stays for the sessions written before the split.
         model_used: str | None = None,
+        campaign_id: str | None = None,
+        base_labels: dict[str, str] | None = None,
     ) -> None:
         await self.conn.execute(
             """
             INSERT INTO sessions (
                 id, name, guild_id, channel_id, channel_name, text_channel_id,
-                started_by_user_id, start_time, participants_json, language, model_used
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                started_by_user_id, start_time, participants_json, language, model_used,
+                campaign_id, base_labels_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -144,12 +161,19 @@ class Database:
                 json.dumps(participants, ensure_ascii=False),
                 language,
                 model_used,
+                campaign_id,
+                json.dumps(base_labels or {}, ensure_ascii=False),
             ),
         )
         await self.conn.commit()
 
+    _SESSION_SELECT = (
+        "SELECT s.*, c.name AS campaign_name FROM sessions s "
+        "LEFT JOIN campaigns c ON c.id = s.campaign_id"
+    )
+
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
-        cursor = await self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        cursor = await self.conn.execute(f"{self._SESSION_SELECT} WHERE s.id = ?", (session_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
@@ -163,25 +187,45 @@ class Database:
         )
         await self.conn.commit()
 
-    async def merge_participants(self, session_id: str, participants: dict[str, str]) -> None:
+    async def merge_participants(
+        self,
+        session_id: str,
+        participants: dict[str, str],
+        base_labels: dict[str, str] | None = None,
+    ) -> None:
         """Add newly-seen speakers without dropping the ones already recorded."""
         row = await self.get_session(session_id)
         if row is None:
             return
         current = json.loads(row["participants_json"] or "{}")
         current.update(participants)
-        await self.update_session(
-            session_id, participants_json=json.dumps(current, ensure_ascii=False)
-        )
+        fields: dict[str, Any] = {"participants_json": json.dumps(current, ensure_ascii=False)}
+        if base_labels:
+            base = json.loads(row["base_labels_json"] or "{}")
+            base.update(base_labels)
+            fields["base_labels_json"] = json.dumps(base, ensure_ascii=False)
+        await self.update_session(session_id, **fields)
 
     async def set_offsets(self, session_id: str, offsets: dict[str, float]) -> None:
         await self.update_session(session_id, offsets_json=json.dumps(offsets, ensure_ascii=False))
 
-    async def list_sessions(self, limit: int = 25) -> list[dict[str, Any]]:
+    async def list_sessions(
+        self, limit: int = 25, campaign: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Finished sessions, newest first.
+
+        `campaign` is None for all of them, "unassigned" for those with no
+        campaign, or a campaign id.
+        """
+        clause, args = "", []
+        if campaign == "unassigned":
+            clause = " AND s.campaign_id IS NULL"
+        elif campaign is not None:
+            clause, args = " AND s.campaign_id = ?", [campaign]
         cursor = await self.conn.execute(
-            "SELECT * FROM sessions WHERE completed = 1 AND cancelled = 0 "
-            "ORDER BY start_time DESC LIMIT ?",
-            (limit,),
+            f"{self._SESSION_SELECT} WHERE s.completed = 1 AND s.cancelled = 0{clause} "
+            "ORDER BY s.start_time DESC LIMIT ?",
+            (*args, limit),
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -230,9 +274,198 @@ class Database:
         await self.conn.execute("DELETE FROM characters WHERE user_id = ?", (str(user_id),))
         await self.conn.commit()
 
-    async def character_map(self) -> dict[str, str]:
+    async def character_map(self, campaign_id: str | None = None) -> dict[str, str]:
+        """The global character map, with a campaign's own names laid over it."""
         cursor = await self.conn.execute("SELECT user_id, character_name FROM characters")
+        mapping = {row["user_id"]: row["character_name"] for row in await cursor.fetchall()}
+        if campaign_id:
+            mapping.update(await self.campaign_characters(campaign_id))
+        return mapping
+
+    # -- campaigns ---------------------------------------------------------
+
+    async def create_campaign(
+        self, *, name: str, channel_id: int | None = None, language: str | None = None
+    ) -> dict[str, Any]:
+        campaign_id = secrets.token_hex(6)
+        try:
+            await self.conn.execute(
+                "INSERT INTO campaigns (id, name, channel_id, language, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    campaign_id,
+                    name,
+                    str(channel_id) if channel_id else None,
+                    language,
+                    to_iso(utcnow()),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise CampaignConflict(_CAMPAIGN_TAKEN) from exc
+        await self.conn.commit()
+        created = await self.get_campaign(campaign_id)
+        assert created is not None
+        return created
+
+    async def get_campaign(self, campaign_id: str) -> dict[str, Any] | None:
+        cursor = await self.conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_campaigns(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        where = "" if include_archived else "WHERE c.archived = 0 "
+        cursor = await self.conn.execute(
+            "SELECT c.*, COUNT(s.id) AS session_count FROM campaigns c "
+            "LEFT JOIN sessions s ON s.campaign_id = c.id AND s.completed = 1 AND s.cancelled = 0 "
+            f"{where}GROUP BY c.id ORDER BY c.name COLLATE NOCASE"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def update_campaign(self, campaign_id: str, **fields: Any) -> dict[str, Any] | None:
+        unknown = set(fields) - _CAMPAIGN_FIELDS
+        if unknown:
+            raise ValueError(f"Cannot update campaign field(s): {', '.join(sorted(unknown))}")
+        if fields:
+            if fields.get("channel_id") is not None:
+                fields["channel_id"] = str(fields["channel_id"])
+            assignments = ", ".join(f"{key} = ?" for key in fields)
+            try:
+                await self.conn.execute(
+                    f"UPDATE campaigns SET {assignments} WHERE id = ?",
+                    (*fields.values(), campaign_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise CampaignConflict(_CAMPAIGN_TAKEN) from exc
+            await self.conn.commit()
+        return await self.get_campaign(campaign_id)
+
+    async def campaign_for_channel(self, channel_id: int) -> dict[str, Any] | None:
+        cursor = await self.conn.execute(
+            "SELECT * FROM campaigns WHERE channel_id = ? AND archived = 0", (str(channel_id),)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def replace_terms(self, campaign_id: str, terms: list[str]) -> None:
+        await self.conn.execute("DELETE FROM campaign_terms WHERE campaign_id = ?", (campaign_id,))
+        await self.conn.executemany(
+            "INSERT INTO campaign_terms (campaign_id, term, position) VALUES (?, ?, ?)",
+            [(campaign_id, term, position) for position, term in enumerate(terms)],
+        )
+        await self.conn.commit()
+
+    async def campaign_terms(self, campaign_id: str) -> list[str]:
+        cursor = await self.conn.execute(
+            "SELECT term FROM campaign_terms WHERE campaign_id = ? ORDER BY position",
+            (campaign_id,),
+        )
+        return [row["term"] for row in await cursor.fetchall()]
+
+    async def replace_corrections(self, campaign_id: str, pairs: list[tuple[str, str]]) -> None:
+        await self.conn.execute(
+            "DELETE FROM campaign_corrections WHERE campaign_id = ?", (campaign_id,)
+        )
+        await self.conn.executemany(
+            "INSERT INTO campaign_corrections (campaign_id, heard, correct) VALUES (?, ?, ?)",
+            [(campaign_id, heard, correct) for heard, correct in pairs],
+        )
+        await self.conn.commit()
+
+    async def campaign_corrections(self, campaign_id: str) -> list[tuple[str, str]]:
+        cursor = await self.conn.execute(
+            "SELECT heard, correct FROM campaign_corrections WHERE campaign_id = ? ORDER BY rowid",
+            (campaign_id,),
+        )
+        return [(row["heard"], row["correct"]) for row in await cursor.fetchall()]
+
+    async def set_campaign_character(
+        self, campaign_id: str, user_id: int, character_name: str
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO campaign_characters (campaign_id, user_id, character_name, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(campaign_id, user_id) DO UPDATE SET "
+            "character_name = excluded.character_name, updated_at = excluded.updated_at",
+            (campaign_id, str(user_id), character_name, to_iso(utcnow())),
+        )
+        await self.conn.commit()
+
+    async def assign_session_campaign(
+        self, session_id: str, campaign_id: str | None
+    ) -> dict[str, Any] | None:
+        """Tag a finished session, or clear the tag.
+
+        Nothing on disk changes. The relabel map recorded here is what a
+        transcript is shown with; clearing the tag rebuilds it from the plain
+        (non-character) labels plus the global character map, so the old
+        campaign's character names disappear with the tag.
+        """
+        row = await self.get_session(session_id)
+        if row is None:
+            return None
+        if campaign_id is not None and await self.get_campaign(campaign_id) is None:
+            raise LookupError("No such campaign.")
+        participants = json.loads(row["participants_json"] or "{}")
+        base = json.loads(row["base_labels_json"] or "{}")
+        relabel = relabel_map(participants, base, await self.character_map(campaign_id))
+        await self.update_session(
+            session_id,
+            campaign_id=campaign_id,
+            relabel_json=json.dumps(relabel, ensure_ascii=False),
+        )
+        return await self.get_session(session_id)
+
+    async def clear_campaign_character(self, campaign_id: str, user_id: int) -> None:
+        await self.conn.execute(
+            "DELETE FROM campaign_characters WHERE campaign_id = ? AND user_id = ?",
+            (campaign_id, str(user_id)),
+        )
+        await self.conn.commit()
+
+    async def campaign_characters(self, campaign_id: str) -> dict[str, str]:
+        cursor = await self.conn.execute(
+            "SELECT user_id, character_name FROM campaign_characters WHERE campaign_id = ?",
+            (campaign_id,),
+        )
         return {row["user_id"]: row["character_name"] for row in await cursor.fetchall()}
+
+    # -- initiative --------------------------------------------------------
+
+    async def add_initiative(self, user_id: int, label: str, value: int) -> None:
+        """Record a player's total, replacing their earlier one under that name."""
+        await self.conn.execute(
+            "INSERT INTO initiative_reports (user_id, label, value, created_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(user_id, label) DO UPDATE SET "
+            "value = excluded.value, created_at = excluded.created_at",
+            (str(user_id), label, value, to_iso(utcnow())),
+        )
+        # Bounded: keep only the newest few, so a misbehaving client cannot grow it.
+        await self.conn.execute(
+            "DELETE FROM initiative_reports WHERE id NOT IN ("
+            " SELECT id FROM initiative_reports ORDER BY created_at DESC, id DESC LIMIT ?)",
+            (MAX_INITIATIVE,),
+        )
+        await self.conn.commit()
+
+    async def list_initiative(self) -> list[dict[str, Any]]:
+        """Pending totals, oldest first. Expired ones are dropped on the way."""
+        cutoff = to_iso(utcnow() - timedelta(hours=INITIATIVE_MAX_AGE_HOURS))
+        await self.conn.execute("DELETE FROM initiative_reports WHERE created_at < ?", (cutoff,))
+        await self.conn.commit()
+        cursor = await self.conn.execute(
+            "SELECT id, label, value, created_at FROM initiative_reports ORDER BY created_at, id"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def clear_initiative(self, report_id: int | None = None) -> int:
+        """Drop one pending total, or all of them. Returns how many went."""
+        if report_id is None:
+            cursor = await self.conn.execute("DELETE FROM initiative_reports")
+        else:
+            cursor = await self.conn.execute(
+                "DELETE FROM initiative_reports WHERE id = ?", (report_id,)
+            )
+        await self.conn.commit()
+        return cursor.rowcount
 
     # -- transcription queue ----------------------------------------------
 

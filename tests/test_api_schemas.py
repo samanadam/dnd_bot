@@ -70,6 +70,28 @@ def test_session_summary_exposes_only_allowlisted_fields(session_row):
         "cancelled",
         "speakers",
         "speaker_count",
+        "campaign_id",
+        "campaign_name",
+    }
+
+
+def test_campaign_exposes_only_allowlisted_fields():
+    row = {
+        "id": "abc123abc123",
+        "name": "Strahd",
+        "channel_id": "7",
+        "language": None,
+        "archived": 0,
+        "session_count": 3,
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    assert set(schemas.campaign(row)) == {
+        "id",
+        "name",
+        "channel_id",
+        "language",
+        "archived",
+        "session_count",
     }
 
 

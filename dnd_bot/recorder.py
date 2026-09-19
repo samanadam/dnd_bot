@@ -18,6 +18,7 @@ from typing import Any
 import discord
 
 from . import capacity, paths
+from .campaigns import prompt_hints
 from .config import Config
 from .contract import track_user_id
 from .db import Database
@@ -74,6 +75,9 @@ class ActiveSession:
     stopping: bool = False
     # Non-fatal conditions noticed at start, for the cog to pass on.
     warnings: list[str] = field(default_factory=list)
+    # None means unassigned: no campaign was chosen and the channel maps to none.
+    campaign_id: str | None = None
+    campaign_name: str | None = None
 
     @property
     def key(self) -> SessionKey:
@@ -127,13 +131,33 @@ class SessionManager:
     def sessions_in_guild(self, guild_id: int) -> list[ActiveSession]:
         return [s for s in self.active.values() if s.guild_id == guild_id]
 
-    async def _resolve_members(self, channel: discord.VoiceChannel) -> dict[str, str]:
-        character_map = await self.db.character_map()
-        return {
-            str(member.id): resolve_label(str(member.id), character_map, member.nick, member.name)
-            for member in channel.members
-            if not member.bot
+    async def _resolve_members(
+        self, channel: discord.VoiceChannel, campaign_id: str | None = None
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """(labels, base_labels) for whoever is in the channel now.
+
+        Labels use the campaign's character names. Base labels are the plain
+        nickname or username, kept so a later re-tag cannot leak a character
+        name from another campaign.
+        """
+        character_map = await self.db.character_map(campaign_id)
+        members = [member for member in channel.members if not member.bot]
+        labels = {
+            str(m.id): resolve_label(str(m.id), character_map, m.nick, m.name) for m in members
         }
+        base = {str(m.id): resolve_label(str(m.id), None, m.nick, m.name) for m in members}
+        return labels, base
+
+    async def _resolve_campaign(
+        self, channel_id: int, explicit: str | None
+    ) -> dict[str, Any] | None:
+        """An explicit choice wins; otherwise the channel's own campaign; else none."""
+        if explicit:
+            campaign = await self.db.get_campaign(explicit)
+            if campaign is None or campaign["archived"]:
+                raise RecordingError("That campaign does not exist or is archived.")
+            return campaign
+        return await self.db.campaign_for_channel(channel_id)
 
     async def _music_release(self, guild_id: int, reason: str) -> None:
         """Make music let go of the voice slot before we claim it."""
@@ -165,6 +189,7 @@ class SessionManager:
         text_channel_id: int | None,
         invoker: discord.Member,
         name: str | None,
+        campaign_id: str | None = None,
     ) -> ActiveSession:
         key = (channel.guild.id, channel.id)
         async with self.lock_for(key):
@@ -215,6 +240,10 @@ class SessionManager:
                     room.required_gb,
                 )
 
+            # Resolved before joining voice, so a bad choice fails without a
+            # connection to tear down.
+            campaign = await self._resolve_campaign(channel.id, campaign_id)
+
             start_time = utcnow()
             session_id = new_session_id(start_time, self.config.tz)
             display_name = name or f"{channel.name} {start_time.strftime('%Y-%m-%d %H:%M')}"
@@ -247,7 +276,9 @@ class SessionManager:
                 raise RecordingError(f"Could not join **{channel.name}**: {exc}") from exc
 
             paths.ensure_session_dirs(self.config.sessions_dir, session_id)
-            labels = await self._resolve_members(channel)
+            labels, base_labels = await self._resolve_members(
+                channel, campaign["id"] if campaign else None
+            )
 
             await self.db.create_session(
                 session_id=session_id,
@@ -259,7 +290,9 @@ class SessionManager:
                 started_by_user_id=invoker.id,
                 start_time=to_iso(start_time),
                 participants=labels,
-                language=self.config.transcribe_language,
+                language=(campaign or {}).get("language") or self.config.transcribe_language,
+                campaign_id=campaign["id"] if campaign else None,
+                base_labels=base_labels,
             )
 
             session = ActiveSession(
@@ -275,6 +308,8 @@ class SessionManager:
                 sink=self._build_sink(session_id, 0.0, {}),
                 labels=labels,
                 warnings=start_warnings,
+                campaign_id=campaign["id"] if campaign else None,
+                campaign_name=campaign["name"] if campaign else None,
             )
             self.active[key] = session
             await self._start_recording(session)
@@ -318,16 +353,17 @@ class SessionManager:
             if session is not None and user_id not in session.offsets:
                 session.offsets[user_id] = offset
                 if user_id not in session.labels:
-                    character_map = await self.db.character_map()
+                    character_map = await self.db.character_map(session.campaign_id)
                     guild = self.bot.get_guild(session.guild_id)
                     member = guild.get_member(int(user_id)) if guild else None
-                    session.labels[user_id] = resolve_label(
-                        user_id,
-                        character_map,
-                        getattr(member, "nick", None),
-                        getattr(member, "name", None),
+                    nick = getattr(member, "nick", None)
+                    name = getattr(member, "name", None)
+                    session.labels[user_id] = resolve_label(user_id, character_map, nick, name)
+                    await self.db.merge_participants(
+                        session_id,
+                        {user_id: session.labels[user_id]},
+                        {user_id: resolve_label(user_id, None, nick, name)},
                     )
-                    await self.db.merge_participants(session_id, {user_id: session.labels[user_id]})
                 await self.db.set_offsets(session_id, session.offsets)
         except Exception:  # noqa: BLE001 - never let a callback kill the session
             log.exception("Failed registering speaker %s for %s", user_id, session_id)
@@ -597,6 +633,11 @@ class SessionManager:
         if row is None or not self.config.outbox_enabled:
             return []
         try:
+            campaign_id = row.get("campaign_id")
+            prompt_extra = self.config.whisper_prompt_extra
+            if campaign_id:
+                terms = await self.db.campaign_terms(campaign_id)
+                prompt_extra = prompt_hints(terms, self.config.whisper_prompt_extra)
             await asyncio.to_thread(
                 publish,
                 row,
@@ -604,7 +645,9 @@ class SessionManager:
                 outbox_root=self.config.outbox_dir,
                 audio_format=self.config.audio_format,
                 timezone_name=self.config.timezone_name,
-                prompt_extra=self.config.whisper_prompt_extra,
+                prompt_extra=prompt_extra,
+                campaign_id=campaign_id,
+                campaign_name=row.get("campaign_name"),
                 move=True,
             )
         except Exception as exc:  # noqa: BLE001 - reported, never fatal to the stop path

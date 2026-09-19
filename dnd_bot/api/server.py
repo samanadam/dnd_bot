@@ -9,15 +9,17 @@ hand-off for every call.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 from aiohttp import web
 
+from ..search import TranscriptIndex
 from ..transcripts import TranscriptReader
 from ..uploads import Uploader
 from .auth import RateLimiter, auth_middleware
-from .keys import BOT, CONFIG, RATE_LIMITER, TRANSCRIPTS, UPLOADER, UPTIME
+from .keys import BOT, CONFIG, RATE_LIMITER, SEARCH, SYNC_LOCK, TRANSCRIPTS, UPLOADER, UPTIME
 from .middleware import (
     body_middleware,
     cors_middleware,
@@ -69,6 +71,8 @@ def build_app(bot) -> web.Application:
         else None
     )
     app[TRANSCRIPTS] = TranscriptReader(bot.config.sessions_dir)
+    app[SEARCH] = TranscriptIndex(bot.db, app[TRANSCRIPTS])
+    app[SYNC_LOCK] = asyncio.Lock()
 
     app.add_routes(health_routes)
     try:
@@ -84,13 +88,19 @@ def build_app(bot) -> web.Application:
     except ImportError:  # pragma: no cover - present from phase 3 onward
         pass
 
+    from .routes_campaigns import routes as campaign_routes
     from .routes_dice import routes as dice_routes
+    from .routes_initiative import routes as initiative_routes
     from .routes_soundboard import routes as soundboard_routes
+    from .routes_transcription import routes as transcription_routes
     from .routes_transcripts import routes as transcript_routes
 
+    app.add_routes(campaign_routes)
     app.add_routes(dice_routes)
+    app.add_routes(initiative_routes)
     app.add_routes(soundboard_routes)
     app.add_routes(transcript_routes)
+    app.add_routes(transcription_routes)
 
     # No catch-all OPTIONS route: cors_middleware answers preflights before the
     # handler runs, including for paths the router does not know. A catch-all

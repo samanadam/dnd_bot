@@ -38,6 +38,10 @@ SCHEMA_VERSION = 2
 # Versions this build can still read. A 1 directory has bare `<user_id>`
 # stems, which track_user_id handles unchanged.
 READABLE_SCHEMAS = (1, 2)
+# Additive, still schema 2: `campaign_id` and `campaign_name` are optional.
+# A transcriber that predates them ignores the keys; a recorder that predates
+# them omits the keys and both read back as None. Nothing about a track or an
+# offset changed, so there is nothing to misread and no reason to bump.
 
 METADATA_FILENAME = "metadata.json"
 READY_MARKER = "READY"
@@ -70,6 +74,8 @@ class SessionMetadata:
     language: str = "tr"
     prompt_extra: str = ""
     audio_format: str = "opus"
+    campaign_id: str | None = None
+    campaign_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +91,8 @@ class SessionMetadata:
             "language": self.language,
             "prompt_extra": self.prompt_extra,
             "audio_format": self.audio_format,
+            "campaign_id": self.campaign_id,
+            "campaign_name": self.campaign_name,
         }
 
     @classmethod
@@ -110,6 +118,8 @@ class SessionMetadata:
             language=payload.get("language") or "tr",
             prompt_extra=payload.get("prompt_extra") or "",
             audio_format=payload.get("audio_format") or "opus",
+            campaign_id=payload.get("campaign_id") or None,
+            campaign_name=payload.get("campaign_name") or None,
         )
 
 

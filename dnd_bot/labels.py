@@ -2,7 +2,8 @@
 
 Priority is fixed: character name (/character set) > server nickname > username.
 Labels are resolved once per session and stored with the session so a transcript
-stays self-contained even if the mapping changes later.
+stays self-contained even if the mapping changes later. A campaign's own
+character map, when there is one, is laid over the global one before this runs.
 """
 
 from __future__ import annotations

@@ -23,6 +23,7 @@ from ..access import require_privileged
 from ..exports import ExportError, build_export, fits_discord_upload, size_mb
 from ..recorder import RecordingError
 from ..timeutil import format_duration, from_iso, to_local, utcnow
+from .campaign import campaign_names, find_campaign
 
 log = logging.getLogger(__name__)
 
@@ -50,18 +51,32 @@ class SessionCog(commands.Cog):
         self,
         ctx: discord.ApplicationContext,
         name: discord.Option(str, "Name for this session", required=False) = None,
+        campaign: discord.Option(
+            str,
+            "Campaign (defaults to this voice channel's)",
+            required=False,
+            autocomplete=campaign_names,
+        ) = None,
     ) -> None:
         await ctx.defer()
         channel = _voice_channel_of(ctx)
         if channel is None:
             await ctx.respond("Join a voice channel first, then run `/session start`.")
             return
+        campaign_id = None
+        if campaign:
+            found = await find_campaign(self.db, campaign)
+            if found is None:
+                await ctx.respond("No such campaign. See `/campaign list`.")
+                return
+            campaign_id = found["id"]
         try:
             session = await self.manager.start(
                 channel=channel,
                 text_channel_id=ctx.channel_id,
                 invoker=ctx.author,
                 name=name,
+                campaign_id=campaign_id,
             )
         except RecordingError as exc:
             await ctx.respond(str(exc))
@@ -74,6 +89,7 @@ class SessionCog(commands.Cog):
         lines = [
             f"Recording **{session.name}** in **{channel.name}**.",
             f"Session id: `{session.session_id}`",
+            f"Campaign: **{session.campaign_name or 'none (unassigned)'}**",
             f"In channel now: {members}",
             "Stop with `/session stop`.",
         ]

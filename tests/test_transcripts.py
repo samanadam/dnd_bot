@@ -178,3 +178,45 @@ async def test_odd_session_ids_are_404(client):
 
 async def test_needs_the_token(client):
     assert (await client.get("/api/v1/sessions/session-1/transcript")).status == 401
+
+
+def _write_plain(root, session_id="s1"):
+    path = paths.transcript_json_path(root, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "segments": [
+            {"speaker": "Old", "user_id": "10", "start": 1.0, "end": 2.0, "text": "el drin geldi"},
+            {"speaker": "Other", "user_id": "11", "start": 3.0, "end": 4.0, "text": "tamam"},
+        ]
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_read_relabels_by_user_id_and_applies_corrections(tmp_path):
+    _write_plain(tmp_path)
+    reader = TranscriptReader(tmp_path)
+    parsed = reader.read("s1", relabel={"10": "Thorin"}, corrections=[("el drin", "Eldrin")])
+    assert [s["speaker"] for s in parsed.segments] == ["Thorin", "Other"]
+    assert parsed.segments[0]["text"] == "Eldrin geldi"
+    assert parsed.meta["speakers"] == ["Other", "Thorin"]
+    assert "10" not in json.dumps(parsed.segments)
+
+
+def test_cache_never_leaks_one_campaigns_view_into_another(tmp_path):
+    _write_plain(tmp_path)
+    reader = TranscriptReader(tmp_path)
+    reader.read("s1", relabel={"10": "A"}, corrections=[("el drin", "Eldrin")])
+    plain = reader.read("s1")
+    assert plain.segments[0]["speaker"] == "Old"
+    assert plain.segments[0]["text"] == "el drin geldi"
+
+
+def test_markdown_transcripts_still_get_corrections(tmp_path):
+    md = paths.transcript_md_path(tmp_path, "s")
+    md.parent.mkdir(parents=True)
+    md.write_text(MARKDOWN, encoding="utf-8")
+    parsed = TranscriptReader(tmp_path).read(
+        "s", relabel={"1": "Nobody"}, corrections=[("zar", "Zarr")]
+    )
+    assert parsed.segments[0]["text"] == "Zarr at."
+    assert parsed.segments[0]["speaker"] == "DM"

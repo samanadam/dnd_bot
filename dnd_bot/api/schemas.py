@@ -55,6 +55,20 @@ def session_summary(row: Mapping[str, Any]) -> dict[str, Any]:
         "cancelled": bool(row["cancelled"]),
         "speakers": speakers,
         "speaker_count": len(speakers),
+        "campaign_id": row.get("campaign_id"),
+        "campaign_name": row.get("campaign_name"),
+    }
+
+
+def campaign(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One campaign. `channel_id` is the only id, and the portal needs it."""
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "channel_id": row["channel_id"],
+        "language": row["language"],
+        "archived": bool(row["archived"]),
+        "session_count": int(row.get("session_count", 0)),
     }
 
 
@@ -75,6 +89,8 @@ def active_session(session: Any) -> dict[str, Any]:
         "speakers": labels,
         "speaker_count": len(labels),
         "warnings": list(getattr(session, "warnings", [])),
+        "campaign_id": getattr(session, "campaign_id", None),
+        "campaign_name": getattr(session, "campaign_name", None),
     }
 
 
