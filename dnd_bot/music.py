@@ -609,14 +609,14 @@ class MusicManager:
         """Layers are local files only. A stream would expire mid-loop, and
         ffmpeg is told to read `file` and nothing else for them.
 
-        A YouTube sound is only accepted as a file the resolver saved in the
+        A YouTube or SoundCloud sound is only accepted as a file the resolver saved in the
         music cache; a track from the bucket is already a cache path.
         """
         if not track.uri or looks_like_a_flag(track.uri):
             return False
         if track.source == "r2":
             return True
-        if track.source != "youtube":
+        if track.source not in ("youtube", "soundcloud"):
             return False
         try:
             cache = Path(self.config.music_cache_dir).resolve()

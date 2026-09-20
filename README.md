@@ -187,7 +187,8 @@ Copy `.env.example` to `.env`. Every setting is read from the environment.
 | `MUSIC_MAX_QUEUE` | `100` | Tracks held, current one included. |
 | `MUSIC_CACHE_MAX_MB` | `2000` | Cache under `DATA_DIR/music`, pruned oldest first. |
 | `MUSIC_RESUME_AFTER_RECONNECT` | `true` | Restart the current track after a voice reconnect. |
-| `MUSIC_YTDLP_ENABLED` | `false` | YouTube streaming. Not in the default image. |
+| `MUSIC_YTDLP_ENABLED` | `false` | YouTube streaming, and the switch SoundCloud needs too. Not in the default image. |
+| `MUSIC_SOUNDCLOUD_ENABLED` | `true` | SoundCloud search, music, ambience and effects. Only has an effect when `MUSIC_YTDLP_ENABLED=true`. |
 | `MUSIC_YTDLP_TIMEOUT_SECONDS` | `20` | How long a link resolution may take before it is killed. |
 | `MUSIC_YTDLP_MAX_CONCURRENT` | `2` | Resolutions running at once. This host is also recording. |
 | `MUSIC_STREAM_TTL_SECONDS` | `1800` | Re-resolve a stream URL older than this before playing it. |
@@ -502,6 +503,26 @@ no network at all.
 - `POST /api/v1/soundboard/prepare` does the download without playing, so effects
   can be warmed before the game.
 
+#### SoundCloud
+
+YouTube refuses many datacenter addresses ("Sign in to confirm you're not a
+bot"); SoundCloud does not. With `MUSIC_YTDLP_ENABLED=true` the bot also offers a
+`soundcloud` source, using the same yt-dlp install and the same guards:
+
+- **Search and play** like YouTube: `POST /api/v1/music/search` and
+  `/api/v1/music/play` with `"source": "soundcloud"`. Search hits come back as
+  `https://soundcloud.com/<artist>/<track>` links.
+- **Ambience and effects** with `"source": "soundcloud"` on `/soundboard/play` and
+  `/soundboard/prepare`, saved once under `DATA_DIR/music/soundcloud/` with the
+  same length, size and disk limits as YouTube sounds.
+- **Exact link only** for sounds: `https://soundcloud.com/<artist>/<track>`. No
+  playlists (`/sets/`), profile pages, private-link tokens, query strings or other
+  hosts. A link is rebuilt from the two names, lower-cased, and the file is named
+  from a hash of them, so nothing from the link reaches the file system. A track
+  that has since been renamed no longer matches and is refused.
+- Only public tracks. Private ones, and tracks whose owner blocked streaming, fail
+  with a normal resolver error.
+
 ### What the audio path refuses to do
 
 Both music sources feed ffmpeg, which treats its input as a protocol
@@ -590,8 +611,8 @@ list.
 | POST | `/api/v1/music/upload?folder=music\|ambience\|sfx&filename=` | Raw audio body (`audio/*`, `Content-Length` required, `MUSIC_UPLOAD_MAX_MB` cap). The name is sanitised, the bytes must match the extension and ffprobe must find audio; existing names are refused (409). One upload at a time. |
 | POST | `/api/v1/music/delete` | `{id}` — removes a listed audio file under the music prefix. |
 | GET | `/api/v1/soundboard` | Ambience (`music/ambience/`) and effects (`music/sfx/`), plus the layers playing now. |
-| POST | `/api/v1/soundboard/play` | `{kind: ambience\|sfx, id, source?: r2\|youtube, volume?, channel_id?}` — mixed over the music. Ambience loops (3 at most); effects play once (6 at most, oldest replaced). With `source: youtube` the `id` is an exact watch link and the sound is saved first (see above). |
-| POST | `/api/v1/soundboard/prepare` | `{kind, id}` — YouTube only. Saves the sound without playing it and returns `{id, title, source, duration_seconds}`. |
+| POST | `/api/v1/soundboard/play` | `{kind: ambience\|sfx, id, source?: r2\|youtube\|soundcloud, volume?, channel_id?}` — mixed over the music. Ambience loops (3 at most); effects play once (6 at most, oldest replaced). With `source: youtube` or `soundcloud` the `id` is an exact link and the sound is saved first (see above). |
+| POST | `/api/v1/soundboard/prepare` | `{kind, id, source?: youtube\|soundcloud}` — Saves the sound without playing it and returns `{id, title, source, duration_seconds}`. |
 | POST | `/api/v1/soundboard/stop` | `{layer_id}`, `{kind}` or `{}` for everything. |
 | POST | `/api/v1/soundboard/volume` | `{layer_id, volume}` — 0 to 2. |
 | POST | `/api/v1/dice/announce` | `{expression, total, breakdown, label?, channel_id?}` — posts a portal roll to `DICE_CHANNEL_ID` (or the named channel of this server), mentions disabled. |

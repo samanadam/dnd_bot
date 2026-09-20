@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 routes = web.RouteTableDef()
 
 LAYER_ID = re.compile(r"^[0-9a-f]{8}$")
+# Sources whose sounds are downloaded once into the music cache and played from disk.
+DOWNLOADED_SOURCES = ("youtube", "soundcloud")
 
 
 def _kind(value: object) -> str:
@@ -66,8 +68,8 @@ def _track_id(payload: dict) -> str:
 
 def _source_name(payload: dict) -> str:
     name = payload.get("source", "r2")
-    if name not in ("r2", "youtube"):
-        raise ApiError(400, "bad_request", "source must be r2 or youtube.")
+    if name not in ("r2", *DOWNLOADED_SOURCES):
+        raise ApiError(400, "bad_request", "source must be r2, youtube or soundcloud.")
     return str(name)
 
 
@@ -79,7 +81,7 @@ async def _resolve_layer(request: web.Request, source_name: str, kind: str, trac
     link and every limit itself.
     """
     source = _source(request, source_name)
-    if source_name == "youtube":
+    if source_name in DOWNLOADED_SOURCES:
         return await source.fetch_layer(track_id, kind)
     allowed = {track.id for track in await source.browse_folder(kind)}
     if track_id not in allowed:
@@ -89,10 +91,13 @@ async def _resolve_layer(request: web.Request, source_name: str, kind: str, trac
 
 @routes.post("/api/v1/soundboard/prepare")
 async def prepare(request: web.Request) -> web.Response:
-    """Download a YouTube sound ahead of time so it starts at once later."""
+    """Download a YouTube or SoundCloud sound ahead of time so it starts at once later."""
     payload = await read_json(request)
     kind = _kind(payload.get("kind"))
-    track = await _resolve_layer(request, "youtube", kind, _track_id(payload))
+    source_name = _source_name({"source": payload.get("source", "youtube")})
+    if source_name not in DOWNLOADED_SOURCES:
+        raise ApiError(400, "bad_request", "Only YouTube and SoundCloud sounds are prepared.")
+    track = await _resolve_layer(request, source_name, kind, _track_id(payload))
     return web.json_response(track.to_dict())
 
 

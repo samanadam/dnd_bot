@@ -266,9 +266,16 @@ async def test_a_layer_needs_a_real_path(manager, voice, uri):
 
 async def test_an_unknown_source_is_not_a_layer(manager, voice, music_config):
     track = youtube_sound(music_config)
-    track.source = "soundcloud"
+    track.source = "spotify"
     with pytest.raises(MusicError):
         await manager.play_layer(1, track, kind="sfx", channel_id=2)
+
+
+async def test_a_soundcloud_file_in_the_cache_is_a_layer(manager, voice, music_config):
+    track = youtube_sound(music_config)
+    track.source = "soundcloud"
+    await manager.play_layer(1, track, kind="sfx", channel_id=2)
+    assert voice.source is not None
 
 
 async def test_the_same_youtube_ambience_cannot_start_twice(manager, voice, music_config):

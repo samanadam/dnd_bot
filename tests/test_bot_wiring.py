@@ -198,7 +198,7 @@ async def test_music_and_api_wire_together(config, tmp_path: Path):
         assert bot.music is not None
         assert bot.manager.music is bot.music
         # No R2 configured here, so YouTube is the only source on offer.
-        assert set(bot.music.sources) == {"youtube"}
+        assert set(bot.music.sources) == {"youtube", "soundcloud"}
     finally:
         await db.close()
 

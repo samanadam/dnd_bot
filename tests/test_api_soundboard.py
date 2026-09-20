@@ -50,13 +50,24 @@ class FakeYouTube:
         if self.error:
             raise self.error
         return Track(
-            track_id, "thunder", "youtube", "/cache/music/youtube/yt_abcdefghijk.m4a", 12.0
+            track_id, "thunder", self.name, f"/cache/music/{self.name}/x_abcdefghijk.m4a", 12.0
         )
+
+
+class FakeSoundCloud(FakeYouTube):
+    name = "soundcloud"
+
+
+CLOUD = "https://soundcloud.com/wolfbravery/tavern-ambience"
 
 
 class FakeMusic:
     def __init__(self):
-        self.sources = {"r2": FakeSource(), "youtube": FakeYouTube()}
+        self.sources = {
+            "r2": FakeSource(),
+            "youtube": FakeYouTube(),
+            "soundcloud": FakeSoundCloud(),
+        }
         self.calls = []
         self.error = None
 
@@ -213,7 +224,7 @@ async def test_the_default_source_is_still_the_bucket(client):
     assert client.music.sources["youtube"].fetched == []
 
 
-@pytest.mark.parametrize("source", ["soundcloud", "", None, 5, ["youtube"], "YouTube"])
+@pytest.mark.parametrize("source", ["spotify", "", None, 5, ["youtube"], "YouTube"])
 async def test_an_unknown_source_is_400(client, source):
     response = await client.post(
         "/api/v1/soundboard/play",
@@ -284,3 +295,52 @@ async def test_prepare_reports_a_failed_download(client):
 async def test_prepare_needs_the_token(client):
     response = await client.post("/api/v1/soundboard/prepare", json={"kind": "sfx", "id": WATCH})
     assert response.status == 401
+
+
+# -- SoundCloud sounds -------------------------------------------------------
+
+
+async def test_a_soundcloud_sound_is_fetched_from_its_own_source_then_played(client):
+    response = await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "ambience", "source": "soundcloud", "id": CLOUD, "volume": 0.4},
+        headers=AUTH,
+    )
+    assert response.status == 200
+    assert client.music.sources["soundcloud"].fetched == [(CLOUD, "ambience")]
+    assert client.music.sources["youtube"].fetched == []
+    assert client.music.calls == [("play", CLOUD, "ambience", 0.4, None)]
+
+
+async def test_prepare_takes_a_soundcloud_source(client):
+    response = await client.post(
+        "/api/v1/soundboard/prepare",
+        json={"kind": "sfx", "source": "soundcloud", "id": CLOUD},
+        headers=AUTH,
+    )
+    assert response.status == 200
+    body = await response.json()
+    assert body["source"] == "soundcloud"
+    assert "uri" not in body and "cache" not in str(body)
+    assert client.music.sources["soundcloud"].fetched == [(CLOUD, "sfx")]
+    assert client.music.sources["youtube"].fetched == []
+
+
+@pytest.mark.parametrize("source", ["r2", "spotify", 5, None])
+async def test_prepare_only_takes_a_downloaded_source(client, source):
+    response = await client.post(
+        "/api/v1/soundboard/prepare",
+        json={"kind": "sfx", "source": source, "id": CLOUD},
+        headers=AUTH,
+    )
+    assert response.status == 400
+
+
+async def test_soundcloud_being_off_is_a_503(client):
+    del client.music.sources["soundcloud"]
+    response = await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "sfx", "source": "soundcloud", "id": CLOUD},
+        headers=AUTH,
+    )
+    assert response.status == 503

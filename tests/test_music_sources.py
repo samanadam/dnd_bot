@@ -165,7 +165,7 @@ def test_build_sources_offers_only_what_is_configured(music_config, store):
     assert set(build_sources(music_config, store)) == {"r2"}
     assert set(build_sources(music_config, None)) == set()
     both = build_sources(replace(music_config, music_youtube_enabled=True), store)
-    assert set(both) == {"r2", "youtube"}
+    assert set(both) == {"r2", "youtube", "soundcloud"}
 
 
 async def test_resolve_refuses_an_object_that_is_not_audio(source):

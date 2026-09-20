@@ -19,7 +19,7 @@ from typing import Protocol
 
 from .music import Track
 from .musiccache import cached_path, ensure_room, prune
-from .ytdlp import SourceDisabled, TrackResolutionError, YtDlpResolver
+from .ytdlp import SoundCloudResolver, SourceDisabled, TrackResolutionError, YtDlpResolver
 
 log = logging.getLogger(__name__)
 
@@ -190,4 +190,6 @@ def build_sources(config, store) -> dict[str, TrackSource]:
         sources["r2"] = R2TrackSource(store, config)
     if config.music_youtube_enabled:
         sources["youtube"] = YtDlpResolver(config)
+        if config.music_soundcloud_enabled:
+            sources["soundcloud"] = SoundCloudResolver(config)
     return sources

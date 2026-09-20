@@ -36,6 +36,8 @@ ALLOWED_INPUT_HOSTS = frozenset(
     }
 )
 
+SOUNDCLOUD_HOSTS = frozenset({"soundcloud.com", "www.soundcloud.com", "m.soundcloud.com"})
+
 # ffmpeg understands protocols we never want reachable through a URL: file://
 # reads the disk, concat: chains inputs, and several others open sockets.
 # These are the only ones any track needs.
@@ -48,6 +50,25 @@ MAX_URL_LENGTH = 2048
 # a path, a query string or an option flag, so a link is rebuilt from it rather
 # than trusted.
 YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+# A SoundCloud track is `<artist>/<track>`, both plain permalink slugs. Anything
+# with more or fewer parts (sets, profiles, private-link tokens) is not a single
+# public track, and a link is rebuilt from the two slugs rather than trusted.
+SOUNDCLOUD_SLUG = r"[A-Za-z0-9_-]{1,120}"
+SOUNDCLOUD_LINK = re.compile(
+    rf"^https://(?:www\.|m\.)?soundcloud\.com/({SOUNDCLOUD_SLUG})/({SOUNDCLOUD_SLUG})/?$"
+)
+# Pages that look like `<artist>/<track>` but are not a track.
+SOUNDCLOUD_NOT_A_TRACK = frozenset(
+    {
+        "sets", "likes", "tracks", "albums", "reposts", "following", "followers",
+        "comments", "popular-tracks", "spotlight", "playlists", "sounds", "people",
+        "users", "groups", "recommended", "new", "you", "discover", "search",
+        "stream", "upload", "charts", "stations", "feed", "settings",
+        "notifications", "messages", "pages", "mobile", "pro", "go", "jobs",
+    }
+)  # fmt: skip
 
 
 class UnsafeUrl(ValueError):
@@ -69,13 +90,13 @@ def _parse(url: str):
         raise UnsafeUrl("URL is malformed.") from exc
 
 
-def check_input_url(url: str) -> str:
+def check_input_url(url: str, hosts: frozenset[str] = ALLOWED_INPUT_HOSTS) -> str:
     """A URL a caller asked us to resolve. Allowlisted hosts, https only."""
     parsed = _parse(url)
     if parsed.scheme != "https":
         raise UnsafeUrl("Only https links are accepted.")
     host = (parsed.hostname or "").lower()
-    if host not in ALLOWED_INPUT_HOSTS:
+    if host not in hosts:
         raise UnsafeUrl("That host is not on the allowlist.")
     return url
 
@@ -85,6 +106,26 @@ def canonical_watch_url(video_id: str) -> str:
     if not isinstance(video_id, str) or not YOUTUBE_ID.fullmatch(video_id):
         raise UnsafeUrl("That is not a YouTube video id.")
     return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def soundcloud_track_path(url: str) -> str | None:
+    """`artist/track` (lower case) for a plain SoundCloud track link, else None."""
+    if not isinstance(url, str) or len(url) > MAX_URL_LENGTH:
+        return None
+    match = SOUNDCLOUD_LINK.fullmatch(url)
+    if match is None:
+        return None
+    artist, track = match.group(1).lower(), match.group(2).lower()
+    if track in SOUNDCLOUD_NOT_A_TRACK or artist in SOUNDCLOUD_NOT_A_TRACK:
+        return None
+    return f"{artist}/{track}"
+
+
+def canonical_soundcloud_url(path: str) -> str:
+    """The one URL form the bot fetches for a SoundCloud track."""
+    if not isinstance(path, str) or soundcloud_track_path(f"https://soundcloud.com/{path}") != path:
+        raise UnsafeUrl("That is not a SoundCloud track.")
+    return f"https://soundcloud.com/{path}"
 
 
 def _addresses(host: str) -> list[ipaddress._BaseAddress]:

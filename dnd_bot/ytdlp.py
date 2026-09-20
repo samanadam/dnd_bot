@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -37,7 +38,17 @@ from typing import Any
 
 from .music import Track
 from .musiccache import CacheFull, ensure_room, prune
-from .net import YOUTUBE_ID, UnsafeUrl, canonical_watch_url, check_input_url, check_stream_url
+from .net import (
+    ALLOWED_INPUT_HOSTS,
+    SOUNDCLOUD_HOSTS,
+    YOUTUBE_ID,
+    UnsafeUrl,
+    canonical_soundcloud_url,
+    canonical_watch_url,
+    check_input_url,
+    check_stream_url,
+    soundcloud_track_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -49,11 +60,15 @@ KNOWN_FAILURES: tuple[tuple[str, str], ...] = (
     ("video unavailable", "That video is unavailable."),
     ("this video is unavailable", "That video is unavailable."),
     ("removed by the uploader", "That video was removed by its uploader."),
-    ("age", "That video is age-restricted and cannot be played by a bot."),
+    ("age-restricted", "That video is age-restricted and cannot be played by a bot."),
+    ("confirm your age", "That video is age-restricted and cannot be played by a bot."),
     ("not available in your country", "That video is blocked in this server's region."),
     ("sign in to confirm", "YouTube is asking this host to sign in; it is rate limited."),
     ("unable to extract", "YouTube changed something; yt-dlp needs updating."),
     ("http error 429", "YouTube is rate limiting this host. Try again later."),
+    ("http error 404", "That link was not found. It may be private or removed."),
+    ("http error 403", "That link is private or not available to this bot."),
+    ("http error 401", "That link is private or not available to this bot."),
 )
 
 TITLE_MAX = 200
@@ -96,12 +111,13 @@ def sanitize_title(raw: Any) -> str:
     return title or "Unknown track"
 
 
-def classify(stderr: str) -> str:
+def classify(stderr: str, service: str = "YouTube") -> str:
     """Turn yt-dlp's output into something an operator can act on."""
     lowered = stderr.lower()
     for needle, message in KNOWN_FAILURES:
         if needle in lowered:
-            return message
+            message = message.replace("YouTube", service)
+            return message if service == "YouTube" else message.replace("video", "track")
     return "Could not resolve that link."
 
 
@@ -157,10 +173,21 @@ class YtDlpResolver:
     """
 
     name = "youtube"
+    # What the operator sees in messages, and how this source names things.
+    service = "YouTube"
+    noun = "video"
+    input_hosts = ALLOWED_INPUT_HOSTS
+    search_prefix = "ytsearch"
+    # Downloaded sounds: <layer_dir>/<file_prefix><key>.<ext>. The directory sits
+    # inside the music cache, so the cache's disk guard and pruning cover it.
+    layer_subdir = LAYER_DIR
+    file_prefix = "yt_"
+    layer_format = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio"
+    stream_format = "bestaudio[acodec!=none]/bestaudio/best"
 
     def __init__(self, config, runner=run_ytdlp, clock=time.monotonic, prober=None) -> None:
         self.config = config
-        self.enabled = bool(config.music_youtube_enabled)
+        self.enabled = self._is_enabled(config)
         # Injected so tests need neither the package nor a network.
         self._runner = runner
         self._clock = clock
@@ -172,9 +199,13 @@ class YtDlpResolver:
 
     # -- plumbing ----------------------------------------------------------
 
+    @staticmethod
+    def _is_enabled(config) -> bool:
+        return bool(config.music_youtube_enabled)
+
     def _check_enabled(self) -> None:
         if not self.enabled:
-            raise SourceDisabled("YouTube playback is turned off on this bot.")
+            raise SourceDisabled(f"{self.service} playback is turned off on this bot.")
 
     def _base_args(self) -> list[str]:
         return [
@@ -190,7 +221,7 @@ class YtDlpResolver:
             "--retries",
             "2",
             "-f",
-            "bestaudio[acodec!=none]/bestaudio/best",
+            self.stream_format,
         ]
 
     async def _extract(self, target: str, extra: list[str] | None = None) -> dict[str, Any]:
@@ -217,7 +248,7 @@ class YtDlpResolver:
         if code != 0:
             message = stderr.decode("utf-8", "replace")
             log.warning("yt-dlp failed (%s) for %r: %s", code, target, message.strip()[:500])
-            raise TrackResolutionError(classify(message))
+            raise TrackResolutionError(classify(message, self.service))
 
         try:
             return json.loads(stdout.decode("utf-8", "replace"))
@@ -255,18 +286,21 @@ class YtDlpResolver:
             log.error("yt-dlp returned an unsafe stream URL: %s", exc)
             raise TrackResolutionError("The resolved stream is not safe to play.") from exc
 
-    def _to_track(self, info: dict[str, Any], *, with_stream: bool) -> Track:
+    def _page_url(self, info: dict[str, Any]) -> str:
+        """The one link this track is known by."""
         video_id = info.get("id", "")
         if isinstance(video_id, str) and YOUTUBE_ID.fullmatch(video_id):
             # A search hit carries only the bare id, and resolve() wants a link.
             # One canonical form also lets the same video be recognised wherever
             # it turns up (queue, saved list, soundboard layer).
-            page = canonical_watch_url(video_id)
-        else:
-            page = info.get("webpage_url") or info.get("original_url") or ""
+            return canonical_watch_url(video_id)
+        return info.get("webpage_url") or info.get("original_url") or str(video_id)
+
+    def _to_track(self, info: dict[str, Any], *, with_stream: bool) -> Track:
+        page = self._page_url(info)
         duration = info.get("duration")
         track = Track(
-            id=page or video_id,
+            id=page,
             title=sanitize_title(info.get("title")),
             source=self.name,
             uri=self._stream_url(info) if with_stream else "",
@@ -306,7 +340,9 @@ class YtDlpResolver:
             return [await self.resolve(query)]
 
         count = max(1, min(limit, 10))
-        info = await self._extract(f"ytsearch{count}:{query}", extra=["--flat-playlist"])
+        info = await self._extract(
+            f"{self.search_prefix}{count}:{query}", extra=["--flat-playlist"]
+        )
         entries = info.get("entries") or []
         tracks = []
         for entry in entries:
@@ -320,11 +356,13 @@ class YtDlpResolver:
         """Turn a link into a track with a live, checked stream URL."""
         self._check_enabled()
         try:
-            target = check_input_url(track_id)
+            target = check_input_url(track_id, self.input_hosts)
         except UnsafeUrl as exc:
             raise TrackResolutionError(str(exc)) from exc
 
         info = await self._extract(target)
+        if info.get("_type") == "playlist" or info.get("entries"):
+            raise TrackResolutionError(f"That link is a playlist. Use a single {self.noun}.")
         self._check_playable(info)
         track = self._to_track(info, with_stream=True)
         log.info("Resolved %s (%.0fs)", track.title, track.duration_seconds or 0)
@@ -341,7 +379,7 @@ class YtDlpResolver:
 
     @property
     def layer_dir(self) -> Path:
-        return Path(self.config.music_cache_dir) / LAYER_DIR
+        return Path(self.config.music_cache_dir) / self.layer_subdir
 
     def _layer_limit(self, kind: str) -> float:
         if kind == "sfx":
@@ -354,31 +392,39 @@ class YtDlpResolver:
     def _describe_limit(seconds: float) -> str:
         return f"{seconds / 60:.0f} minute" if seconds >= 120 else f"{seconds:.0f} second"
 
-    def _layer_files(self, video_id: str) -> list[Path]:
-        # The id was matched against a strict pattern, so it holds no glob syntax.
+    def _layer_key(self, track_id: str) -> tuple[str, str]:
+        """(file key, canonical link) for a link, or raise. Nothing else from the
+        link is kept: the key and the URL are rebuilt from what matched."""
+        match = LAYER_LINK.fullmatch(track_id)
+        if match is None:
+            raise TrackResolutionError("Ambience and effects need a plain YouTube video link.")
+        return match.group(1), canonical_watch_url(match.group(1))
+
+    def _layer_files(self, key: str) -> list[Path]:
+        # The key is made of [A-Za-z0-9_-] only, so it holds no glob syntax.
         if not self.layer_dir.is_dir():
             return []
-        return sorted(self.layer_dir.glob(f"yt_{video_id}.*"))
+        return sorted(self.layer_dir.glob(f"{self.file_prefix}{key}.*"))
 
-    def _audio_file(self, video_id: str) -> Path | None:
-        for path in self._layer_files(video_id):
+    def _audio_file(self, key: str) -> Path | None:
+        for path in self._layer_files(key):
             if path.suffix.lower() in LAYER_SUFFIXES and path.is_file():
                 return path
         return None
 
-    def _discard(self, video_id: str) -> None:
-        """Remove everything a video left behind, partial downloads included."""
-        for path in self._layer_files(video_id):
+    def _discard(self, key: str) -> None:
+        """Remove everything a download left behind, partial ones included."""
+        for path in self._layer_files(key):
             with contextlib.suppress(OSError):
                 path.unlink()
 
-    def _sidecar(self, video_id: str) -> Path:
-        return self.layer_dir / f"yt_{video_id}.json"
+    def _sidecar(self, key: str) -> Path:
+        return self.layer_dir / f"{self.file_prefix}{key}.json"
 
-    def _read_sidecar(self, video_id: str) -> tuple[str, float] | None:
+    def _read_sidecar(self, key: str) -> tuple[str, float] | None:
         """Title and length saved beside a download, or None if unusable."""
         try:
-            data = json.loads(self._sidecar(video_id).read_text(encoding="utf-8"))
+            data = json.loads(self._sidecar(key).read_text(encoding="utf-8"))
             title, duration = data["title"], data["duration"]
         except (OSError, ValueError, KeyError, TypeError):
             return None
@@ -388,18 +434,21 @@ class YtDlpResolver:
             return None
         return sanitize_title(title), float(duration)
 
-    def _write_sidecar(self, video_id: str, title: str, duration: float) -> None:
-        target = self._sidecar(video_id)
+    def _write_sidecar(self, key: str, title: str, duration: float) -> None:
+        target = self._sidecar(key)
         scratch = target.with_name(target.name + ".tmp")
         scratch.write_text(json.dumps({"title": title, "duration": duration}), encoding="utf-8")
         os.replace(scratch, target)
 
-    def _check_layer(self, info: dict[str, Any], kind: str, video_id: str) -> None:
+    def _is_the_named_item(self, info: dict[str, Any], key: str) -> bool:
+        return info.get("id") == key
+
+    def _check_layer(self, info: dict[str, Any], kind: str, key: str) -> None:
         """Refuse what should not be downloaded, before downloading it."""
         if info.get("_type") == "playlist" or info.get("entries"):
-            raise TrackResolutionError("That link is a playlist. Use a single video.")
-        if info.get("id") != video_id:
-            raise TrackResolutionError("That link did not resolve to the video it names.")
+            raise TrackResolutionError(f"That link is a playlist. Use a single {self.noun}.")
+        if not self._is_the_named_item(info, key):
+            raise TrackResolutionError(f"That link did not resolve to the {self.noun} it names.")
         if info.get("is_live"):
             raise TrackResolutionError("That is a live stream and cannot be saved as a sound.")
         duration = info.get("duration")
@@ -415,10 +464,12 @@ class YtDlpResolver:
                 f"That is longer than the {self._describe_limit(limit)} limit for {noun}."
             )
 
-    def _layer_args(self, video_id: str) -> list[str]:
+    def _layer_args(self, key: str, url: str) -> list[str]:
         # `%` is yt-dlp's template escape; a data directory containing one must
         # not be read as a field.
-        template = str(self.layer_dir).replace("%", "%%") + os.sep + f"yt_{video_id}.%(ext)s"
+        template = (
+            str(self.layer_dir).replace("%", "%%") + os.sep + f"{self.file_prefix}{key}.%(ext)s"
+        )
         return [
             # A stray config file must not be able to change what is written where.
             "--ignore-config",
@@ -437,16 +488,16 @@ class YtDlpResolver:
             "--max-filesize",
             f"{max(1, int(self.config.music_yt_layer_max_mb))}M",
             "-f",
-            "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+            self.layer_format,
             "-o",
             template,
             "--",
-            canonical_watch_url(video_id),
+            url,
         ]
 
     @contextlib.asynccontextmanager
-    async def _video_lock(self, video_id: str):
-        entry = self._video_locks.setdefault(video_id, [asyncio.Lock(), 0])
+    async def _video_lock(self, key: str):
+        entry = self._video_locks.setdefault(key, [asyncio.Lock(), 0])
         entry[1] += 1
         try:
             async with entry[0]:
@@ -454,11 +505,11 @@ class YtDlpResolver:
         finally:
             entry[1] -= 1
             if entry[1] == 0:
-                self._video_locks.pop(video_id, None)
+                self._video_locks.pop(key, None)
 
-    def _layer_track(self, video_id: str, path: Path, title: str, duration: float) -> Track:
+    def _layer_track(self, url: str, path: Path, title: str, duration: float) -> Track:
         return Track(
-            id=canonical_watch_url(video_id),
+            id=url,
             title=title,
             source=self.name,
             uri=str(path),
@@ -466,31 +517,28 @@ class YtDlpResolver:
         )
 
     async def fetch_layer(self, track_id: str, kind: str) -> Track:
-        """A YouTube video as a local audio file, ready for the soundboard.
+        """A link as a local audio file, ready for the soundboard.
 
-        The link only names a video. Everything after that is built from its
-        11-character id: the URL yt-dlp fetches and the file name.
+        The link only names an item. Everything after that is built from what
+        matched: the URL yt-dlp fetches and the file name.
         """
         self._check_enabled()
         limit_seconds = self._layer_limit(kind)  # also rejects an unknown kind
         try:
-            check_input_url(track_id)
+            check_input_url(track_id, self.input_hosts)
         except UnsafeUrl as exc:
             raise TrackResolutionError(str(exc)) from exc
-        match = LAYER_LINK.fullmatch(track_id)
-        if match is None:
-            raise TrackResolutionError("Ambience and effects need a plain YouTube video link.")
-        video_id = match.group(1)
+        key, url = self._layer_key(track_id)
 
-        async with self._video_lock(video_id):
-            hit = self._cached_layer(video_id, kind)
+        async with self._video_lock(key):
+            hit = self._cached_layer(key, url, kind)
             if hit is not None:
                 return hit
-            return await self._download_layer(video_id, kind, limit_seconds)
+            return await self._download_layer(key, url, kind, limit_seconds)
 
-    def _cached_layer(self, video_id: str, kind: str) -> Track | None:
-        path = self._audio_file(video_id)
-        saved = self._read_sidecar(video_id) if path is not None else None
+    def _cached_layer(self, key: str, url: str, kind: str) -> Track | None:
+        path = self._audio_file(key)
+        saved = self._read_sidecar(key) if path is not None else None
         if path is None or saved is None:
             return None
         title, duration = saved
@@ -499,14 +547,14 @@ class YtDlpResolver:
         self._check_layer_length(duration, kind)
         # Both files count as used, so the cache's oldest-first pruning keeps
         # the sounds the table actually reaches for.
-        for used in (path, self._sidecar(video_id)):
+        for used in (path, self._sidecar(key)):
             with contextlib.suppress(OSError):
                 os.utime(used)
-        return self._layer_track(video_id, path, title, duration)
+        return self._layer_track(url, path, title, duration)
 
-    async def _download_layer(self, video_id: str, kind: str, limit_seconds: float) -> Track:
-        info = await self._extract(canonical_watch_url(video_id))
-        self._check_layer(info, kind, video_id)
+    async def _download_layer(self, key: str, url: str, kind: str, limit_seconds: float) -> Track:
+        info = await self._extract(url)
+        self._check_layer(info, kind, key)
         title = sanitize_title(info.get("title"))
 
         try:
@@ -519,42 +567,40 @@ class YtDlpResolver:
             raise TrackResolutionError("Not enough free disk to save that sound now.") from exc
 
         self.layer_dir.mkdir(parents=True, exist_ok=True)
-        self._discard(video_id)
+        self._discard(key)
         timeout = float(self.config.music_yt_download_timeout_seconds)
         try:
             async with self._semaphore:
                 code, _stdout, stderr = await asyncio.wait_for(
-                    self._runner(self._layer_args(video_id), timeout), timeout=timeout
+                    self._runner(self._layer_args(key, url), timeout), timeout=timeout
                 )
         except TimeoutError:
-            log.warning("yt-dlp timed out downloading %s", video_id)
-            self._discard(video_id)
+            log.warning("yt-dlp timed out downloading %s", key)
+            self._discard(key)
             raise
         except TrackResolutionError:
-            self._discard(video_id)
+            self._discard(key)
             raise
         except Exception as exc:  # noqa: BLE001 - one shape for the caller
             log.exception("yt-dlp could not be run")
-            self._discard(video_id)
+            self._discard(key)
             raise TrackResolutionError("Could not run the link resolver.") from exc
 
         if code != 0:
             message = stderr.decode("utf-8", "replace")
-            log.warning(
-                "yt-dlp failed (%s) downloading %s: %s", code, video_id, message.strip()[:500]
-            )
-            self._discard(video_id)
-            raise TrackResolutionError(classify(message))
+            log.warning("yt-dlp failed (%s) downloading %s: %s", code, key, message.strip()[:500])
+            self._discard(key)
+            raise TrackResolutionError(classify(message, self.service))
 
         limit_mb = max(1, int(self.config.music_yt_layer_max_mb))
-        path = self._audio_file(video_id)
+        path = self._audio_file(key)
         if path is None:
-            self._discard(video_id)
+            self._discard(key)
             raise TrackResolutionError(
                 f"That audio is larger than the {limit_mb} MB limit or could not be saved."
             )
         if path.stat().st_size > limit_mb * 1_000_000:
-            self._discard(video_id)
+            self._discard(key)
             raise TrackResolutionError(f"That audio is larger than the {limit_mb} MB limit.")
 
         prober = self._prober
@@ -566,10 +612,61 @@ class YtDlpResolver:
             duration = None
         # ffprobe, not the extractor, has the last word on what the file is.
         if not duration or duration > limit_seconds + 5:
-            self._discard(video_id)
+            self._discard(key)
             raise TrackResolutionError("That download is not playable audio of the right length.")
 
-        self._write_sidecar(video_id, title, float(duration))
+        self._write_sidecar(key, title, float(duration))
         await asyncio.to_thread(prune, self.config.music_cache_dir, self.config.music_cache_max_mb)
         log.info("Saved %s (%.0fs) for the soundboard", title, duration)
-        return self._layer_track(video_id, path, title, float(duration))
+        return self._layer_track(url, path, title, float(duration))
+
+
+class SoundCloudResolver(YtDlpResolver):
+    """SoundCloud through the same yt-dlp machinery.
+
+    YouTube refuses datacenter addresses; SoundCloud does not, and its tracks
+    carry no bot check. Everything that makes the YouTube path safe applies
+    unchanged - allowlisted hosts, a link rebuilt from what matched, downloads
+    into the cache with size and length limits - only the identity of a track
+    differs. A track has no fixed-width id, so a sound's file is named from a
+    hash of its `artist/track` path.
+    """
+
+    name = "soundcloud"
+    service = "SoundCloud"
+    noun = "track"
+    input_hosts = SOUNDCLOUD_HOSTS
+    search_prefix = "scsearch"
+    layer_subdir = "soundcloud"
+    file_prefix = "sc_"
+    # A progressive file has a known size, so --max-filesize can refuse a huge
+    # one; an HLS stream has none. Streams like it too: ffmpeg reconnects to a
+    # plain file where it would have to re-read a playlist.
+    layer_format = "bestaudio[protocol^=http][protocol!*=m3u8]/bestaudio[ext=m4a]/bestaudio"
+    stream_format = "bestaudio[protocol^=http][protocol!*=m3u8]/bestaudio[acodec!=none]/bestaudio"
+
+    @staticmethod
+    def _is_enabled(config) -> bool:
+        return bool(config.music_youtube_enabled and config.music_soundcloud_enabled)
+
+    @staticmethod
+    def _key_for(path: str) -> str:
+        return hashlib.sha256(path.encode("utf-8")).hexdigest()[:24]
+
+    def _layer_key(self, track_id: str) -> tuple[str, str]:
+        path = soundcloud_track_path(track_id)
+        if path is None:
+            raise TrackResolutionError("Ambience and effects need a plain SoundCloud track link.")
+        return self._key_for(path), canonical_soundcloud_url(path)
+
+    def _is_the_named_item(self, info: dict[str, Any], key: str) -> bool:
+        if info.get("extractor_key") != "Soundcloud":
+            return False
+        path = soundcloud_track_path(str(info.get("webpage_url") or ""))
+        return path is not None and self._key_for(path) == key
+
+    def _page_url(self, info: dict[str, Any]) -> str:
+        path = soundcloud_track_path(str(info.get("webpage_url") or ""))
+        if path is None:
+            raise TrackResolutionError("That is not a single SoundCloud track.")
+        return canonical_soundcloud_url(path)

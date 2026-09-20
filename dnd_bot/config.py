@@ -116,6 +116,9 @@ class Config:
     # yt-dlp breaks often and is off by default. It is also an optional import,
     # so a missing package is only ever an error for whoever turned this on.
     music_youtube_enabled: bool = False
+    # SoundCloud rides on the same yt-dlp install, so it needs the switch above
+    # too. Its own switch exists for a host that wants YouTube but not this.
+    music_soundcloud_enabled: bool = True
     music_resolve_timeout_seconds: float = 20.0
     # Resolutions run as subprocesses; more than a couple at once on a 1-core
     # host starves the recording, and nobody queues that fast by hand.
@@ -324,6 +327,7 @@ def load_config() -> Config:
 
     music_enabled = _get_bool("MUSIC_ENABLED", False)
     music_youtube_enabled = _get_bool("MUSIC_YTDLP_ENABLED", False)
+    music_soundcloud_enabled = _get_bool("MUSIC_SOUNDCLOUD_ENABLED", True)
     music_default_volume = _get_float("MUSIC_DEFAULT_VOLUME", 0.3)
     if not 0.0 <= music_default_volume <= 2.0:
         raise ConfigError(
@@ -373,6 +377,7 @@ def load_config() -> Config:
         music_cache_max_mb=_get_int("MUSIC_CACHE_MAX_MB", 2000),
         music_resume_after_reconnect=_get_bool("MUSIC_RESUME_AFTER_RECONNECT", True),
         music_youtube_enabled=music_youtube_enabled,
+        music_soundcloud_enabled=music_soundcloud_enabled,
         music_resolve_timeout_seconds=_get_float("MUSIC_YTDLP_TIMEOUT_SECONDS", 20.0),
         music_ytdlp_max_concurrent=_get_int("MUSIC_YTDLP_MAX_CONCURRENT", 2),
         music_stream_ttl_seconds=_get_float("MUSIC_STREAM_TTL_SECONDS", 1800.0),
