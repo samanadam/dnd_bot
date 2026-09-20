@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import socket
 from urllib.parse import urlparse
 
@@ -42,6 +43,11 @@ STREAM_PROTOCOLS = "https,tls,tcp,crypto,http,hls,httpproxy"
 LOCAL_PROTOCOLS = "file"
 
 MAX_URL_LENGTH = 2048
+
+# A YouTube video id is exactly this. Anything that matches cannot carry a host,
+# a path, a query string or an option flag, so a link is rebuilt from it rather
+# than trusted.
+YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 class UnsafeUrl(ValueError):
@@ -72,6 +78,13 @@ def check_input_url(url: str) -> str:
     if host not in ALLOWED_INPUT_HOSTS:
         raise UnsafeUrl("That host is not on the allowlist.")
     return url
+
+
+def canonical_watch_url(video_id: str) -> str:
+    """The one URL form the bot fetches for a video id."""
+    if not isinstance(video_id, str) or not YOUTUBE_ID.fullmatch(video_id):
+        raise UnsafeUrl("That is not a YouTube video id.")
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def _addresses(host: str) -> list[ipaddress._BaseAddress]:

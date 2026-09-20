@@ -193,6 +193,10 @@ Copy `.env.example` to `.env`. Every setting is read from the environment.
 | `MUSIC_STREAM_TTL_SECONDS` | `1800` | Re-resolve a stream URL older than this before playing it. |
 | `MUSIC_MAX_TRACK_SECONDS` | `10800` | Refuse tracks longer than this. |
 | `MUSIC_ALLOW_LIVE` | `false` | Live streams never end, so they block the queue. |
+| `MUSIC_YT_SFX_MAX_SECONDS` | `60` | Longest YouTube video accepted as a sound effect. |
+| `MUSIC_YT_AMBIENCE_MAX_SECONDS` | `1800` | Longest YouTube video accepted as an ambience loop. |
+| `MUSIC_YT_LAYER_MAX_MB` | `40` | Largest audio file saved for one YouTube sound. |
+| `MUSIC_YT_DOWNLOAD_TIMEOUT_SECONDS` | `90` | How long saving one YouTube sound may take before it is killed. |
 
 Note there are no Whisper model settings here. This host does not run Whisper;
 those live in the transcriber's configuration.
@@ -454,9 +458,9 @@ How it is run, and why:
   work instead of abandoning a thread that keeps running.
 - **Bounded**: `MUSIC_YTDLP_MAX_CONCURRENT` resolutions at a time. The same host
   is recording audio.
-- **Nothing is downloaded.** yt-dlp produces a URL; ffmpeg streams it. The
+- **Music is never downloaded.** yt-dlp produces a URL; ffmpeg streams it. The
   resolver is also forbidden its own cache directory, so it cannot write to the
-  disk the recording depends on.
+  disk the recording depends on. The one exception is below.
 - **Stream URLs expire.** YouTube signs them, and honours its own `expire`
   parameter when it is sooner than `MUSIC_STREAM_TTL_SECONDS`. A track queued
   half an hour ago is re-resolved before it plays instead of failing on a dead
@@ -470,6 +474,33 @@ How it is run, and why:
 Keep it updated. When YouTube changes, the symptom is a resolver error saying so,
 and the fix is rebuilding with a newer `yt-dlp` pin in
 `requirements-optional.txt`.
+
+#### Ambience and effects from YouTube
+
+The soundboard (`/api/v1/soundboard/play` with `"source": "youtube"`) does not
+stream. A loop would meet an expired URL halfway through a session, and every
+effect would wait on a resolve. Instead the audio is **saved once** in
+`DATA_DIR/music/youtube/` and played from disk, so a repeat is instant and needs
+no network at all.
+
+- **Exact link only.** `https://www.youtube.com/watch?v=<11 characters>`, nothing
+  else: no playlists, short links, extra parameters or other hosts. The link only
+  names a video; the URL yt-dlp fetches and the file name are rebuilt from the id.
+- **Refused before downloading**: playlists, live streams, unknown lengths, and
+  anything over `MUSIC_YT_SFX_MAX_SECONDS` (effects) or
+  `MUSIC_YT_AMBIENCE_MAX_SECONDS` (ambience).
+- **Bounded on disk**: `MUSIC_YT_LAYER_MAX_MB` per file (yt-dlp is told, and the
+  size is checked again afterwards), the same free-space guard as every cache
+  write, and the cache's oldest-first pruning. A sound you use is refreshed, so
+  the ones you reach for stay.
+- **Checked afterwards**: the file must be a known audio format and ffprobe must
+  find audio of the expected length, otherwise it is deleted.
+- **Clean failure**: a download that overruns is killed and its partial files
+  removed; two requests for one video share a single download.
+- **File-only for ffmpeg.** A layer only accepts a file inside the music cache;
+  the protocol whitelist stays `file`.
+- `POST /api/v1/soundboard/prepare` does the download without playing, so effects
+  can be warmed before the game.
 
 ### What the audio path refuses to do
 
@@ -559,7 +590,8 @@ list.
 | POST | `/api/v1/music/upload?folder=music\|ambience\|sfx&filename=` | Raw audio body (`audio/*`, `Content-Length` required, `MUSIC_UPLOAD_MAX_MB` cap). The name is sanitised, the bytes must match the extension and ffprobe must find audio; existing names are refused (409). One upload at a time. |
 | POST | `/api/v1/music/delete` | `{id}` — removes a listed audio file under the music prefix. |
 | GET | `/api/v1/soundboard` | Ambience (`music/ambience/`) and effects (`music/sfx/`), plus the layers playing now. |
-| POST | `/api/v1/soundboard/play` | `{kind: ambience\|sfx, id, volume?, channel_id?}` — mixed over the music. Ambience loops (3 at most); effects play once (6 at most, oldest replaced). |
+| POST | `/api/v1/soundboard/play` | `{kind: ambience\|sfx, id, source?: r2\|youtube, volume?, channel_id?}` — mixed over the music. Ambience loops (3 at most); effects play once (6 at most, oldest replaced). With `source: youtube` the `id` is an exact watch link and the sound is saved first (see above). |
+| POST | `/api/v1/soundboard/prepare` | `{kind, id}` — YouTube only. Saves the sound without playing it and returns `{id, title, source, duration_seconds}`. |
 | POST | `/api/v1/soundboard/stop` | `{layer_id}`, `{kind}` or `{}` for everything. |
 | POST | `/api/v1/soundboard/volume` | `{layer_id, volume}` — 0 to 2. |
 | POST | `/api/v1/dice/announce` | `{expression, total, breakdown, label?, channel_id?}` — posts a portal roll to `DICE_CHANNEL_ID` (or the named channel of this server), mentions disabled. |

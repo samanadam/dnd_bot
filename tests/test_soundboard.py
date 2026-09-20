@@ -201,3 +201,77 @@ async def test_leaving_forgets_ambience(manager, voice):
     await manager.detach(1, reason="api_leave")
     assert manager.player(1).ambience == []
     assert manager.player(1).mixer is None or manager.player(1).mixer.closed
+
+
+# -- YouTube sounds are cache files, never streams ---------------------------
+
+
+def youtube_sound(config, name="yt_abcdefghijk.m4a") -> Track:
+    directory = config.music_cache_dir / "youtube"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(b"x")
+    return Track(
+        id="https://www.youtube.com/watch?v=abcdefghijk",
+        title="thunder",
+        source="youtube",
+        uri=str(path),
+    )
+
+
+async def test_a_saved_youtube_sound_plays_as_a_layer(manager, voice, music_config):
+    layer = await manager.play_layer(1, youtube_sound(music_config), kind="ambience", channel_id=2)
+    assert [item.id for item in voice.source.snapshot()] == [layer.id]
+    # Layers stay file-only for ffmpeg whatever the source was.
+    assert manager.soundboard_state(1)["layers"][0]["title"] == "thunder"
+
+
+async def test_a_youtube_stream_url_is_never_a_layer(manager, voice):
+    stream = Track(
+        id="https://www.youtube.com/watch?v=abcdefghijk",
+        title="live",
+        source="youtube",
+        uri="https://rr1.googlevideo.com/videoplayback?x=1",
+    )
+    with pytest.raises(MusicError, match="library or cache"):
+        await manager.play_layer(1, stream, kind="ambience", channel_id=2)
+    assert voice.source is None
+
+
+@pytest.mark.parametrize("where", ["outside", "sibling", "traversal"])
+async def test_a_youtube_file_must_be_inside_the_music_cache(manager, voice, music_config, where):
+    cache = music_config.music_cache_dir
+    outside = music_config.data_dir / "secret.m4a"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"x")
+    uri = {
+        "outside": str(outside),
+        "sibling": str(cache.parent / "music-evil" / "a.m4a"),
+        "traversal": str(cache / "youtube" / ".." / ".." / "secret.m4a"),
+    }[where]
+    track = Track(
+        id="https://www.youtube.com/watch?v=abcdefghijk", title="x", source="youtube", uri=uri
+    )
+    with pytest.raises(MusicError):
+        await manager.play_layer(1, track, kind="sfx", channel_id=2)
+    assert voice.source is None
+
+
+@pytest.mark.parametrize("uri", ["", "-i evil", "--help"])
+async def test_a_layer_needs_a_real_path(manager, voice, uri):
+    track = Track(id="x", title="x", source="youtube", uri=uri)
+    with pytest.raises(MusicError):
+        await manager.play_layer(1, track, kind="sfx", channel_id=2)
+
+
+async def test_an_unknown_source_is_not_a_layer(manager, voice, music_config):
+    track = youtube_sound(music_config)
+    track.source = "soundcloud"
+    with pytest.raises(MusicError):
+        await manager.play_layer(1, track, kind="sfx", channel_id=2)
+
+
+async def test_the_same_youtube_ambience_cannot_start_twice(manager, voice, music_config):
+    await manager.play_layer(1, youtube_sound(music_config), kind="ambience", channel_id=2)
+    with pytest.raises(MusicError, match="already playing"):
+        await manager.play_layer(1, youtube_sound(music_config), kind="ambience")

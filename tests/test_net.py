@@ -12,6 +12,7 @@ import pytest
 
 from dnd_bot.net import (
     UnsafeUrl,
+    canonical_watch_url,
     check_input_url,
     check_stream_url,
     ffmpeg_protocol_args,
@@ -118,3 +119,31 @@ def test_a_cached_file_may_not_open_a_socket():
 def test_a_uri_that_would_read_as_an_option_is_recognised():
     assert looks_like_a_flag("-i/etc/passwd")
     assert not looks_like_a_flag("https://example.com/a")
+
+
+@pytest.mark.parametrize("video_id", ["abcdefghijk", "A-Z_0-9abcd", "-----------", "___________"])
+def test_a_video_id_becomes_the_one_canonical_link(video_id):
+    assert canonical_watch_url(video_id) == f"https://www.youtube.com/watch?v={video_id}"
+
+
+@pytest.mark.parametrize(
+    "video_id",
+    [
+        "",
+        "short",
+        "abcdefghijkl",
+        "abcdefghij ",
+        "abcdefghij\n",
+        "abcdefghij/",
+        "abcdefghij&",
+        "abcdefghij?",
+        "abcdefghi..",
+        "--exec=touch",
+        "аbcdefghijk",  # a Cyrillic look-alike for the first letter
+        None,
+        12345678901,
+    ],
+)
+def test_anything_that_is_not_a_video_id_is_refused(video_id):
+    with pytest.raises(UnsafeUrl):
+        canonical_watch_url(video_id)

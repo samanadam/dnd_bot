@@ -247,6 +247,7 @@ async def test_a_failure_does_not_quote_yt_dlp_at_the_caller(youtube_config):
     [
         (b"ERROR: Private video. Sign in", "private"),
         (b"ERROR: Video unavailable", "unavailable"),
+        (b"ERROR: [youtube] abcdefghijk: This video is unavailable", "unavailable"),
         (b"ERROR: Sign in to confirm you're not a bot", "rate limited"),
         (b"ERROR: HTTP Error 429: Too Many Requests", "rate limiting"),
         (b"ERROR: Unable to extract player response", "needs updating"),
@@ -291,6 +292,27 @@ async def test_search_returns_results_without_resolving_streams(youtube_config):
     tracks = await resolver(youtube_config, info=info).search("tavern")
     assert [t.title for t in tracks] == ["One", "Two"]
     assert all(t.uri == "" for t in tracks)
+
+
+async def test_a_search_hit_is_returned_as_the_link_that_resolve_accepts(youtube_config):
+    """Search results carry a bare id; play() then needs a link, or it is refused."""
+    hit = {
+        "_type": "url",
+        "id": "yO2ldAd78Yc",
+        "url": "https://www.youtube.com/watch?v=yO2ldAd78Yc",
+        "title": "Door slam",
+    }
+    (track,) = await resolver(youtube_config, info={"entries": [hit]}).search("door")
+    assert track.id == "https://www.youtube.com/watch?v=yO2ldAd78Yc"
+    # And that id is what resolve() takes without complaint.
+    resolved = await resolver(youtube_config, info={**INFO, "id": "yO2ldAd78Yc"}).resolve(track.id)
+    assert resolved.uri.startswith("https://")
+
+
+async def test_a_resolved_video_keeps_one_canonical_id(youtube_config):
+    info = {**INFO, "id": "yO2ldAd78Yc", "webpage_url": "https://youtube.com/watch?v=yO2ldAd78Yc&t=5"}
+    track = await resolver(youtube_config, info=info).resolve(WATCH)
+    assert track.id == "https://www.youtube.com/watch?v=yO2ldAd78Yc"
 
 
 async def test_search_caps_how_many_results_it_asks_for(youtube_config):

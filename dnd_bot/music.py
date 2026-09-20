@@ -23,6 +23,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import discord
@@ -604,10 +605,29 @@ class MusicManager:
             return False
         return bool(client.is_playing() or client.is_paused())
 
+    def _is_layer_file(self, track: Track) -> bool:
+        """Layers are local files only. A stream would expire mid-loop, and
+        ffmpeg is told to read `file` and nothing else for them.
+
+        A YouTube sound is only accepted as a file the resolver saved in the
+        music cache; a track from the bucket is already a cache path.
+        """
+        if not track.uri or looks_like_a_flag(track.uri):
+            return False
+        if track.source == "r2":
+            return True
+        if track.source != "youtube":
+            return False
+        try:
+            cache = Path(self.config.music_cache_dir).resolve()
+            return Path(track.uri).resolve().is_relative_to(cache)
+        except (OSError, ValueError):
+            return False
+
     def _attach_layer(self, player: GuildPlayer, track: Track, kind: str, volume: float) -> Layer:
         """Put one sound into the mix, creating or wrapping a mixer as needed."""
-        if track.source != "r2" or not track.uri or looks_like_a_flag(track.uri):
-            raise MusicError("Soundboard sounds must be files from the music bucket.")
+        if not self._is_layer_file(track):
+            raise MusicError("Soundboard sounds must be files from the music library or cache.")
         before = ffmpeg_protocol_args(local=True)
         layer = Layer(
             id=secrets.token_hex(4),

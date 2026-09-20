@@ -127,6 +127,13 @@ class Config:
     music_max_track_seconds: float = 10800.0
     # Live streams never end, so they cannot be queued behind anything.
     music_allow_live: bool = False
+    # Soundboard sounds from YouTube are downloaded once into the music cache and
+    # played from disk, so a loop never meets an expired stream URL. These bound
+    # what one link may cost this host.
+    music_yt_sfx_max_seconds: float = 60.0
+    music_yt_ambience_max_seconds: float = 1800.0
+    music_yt_layer_max_mb: int = 40
+    music_yt_download_timeout_seconds: float = 90.0
     # Uploads from the portal stream through this host's disk before R2, so
     # they are capped well below the raw-capture headroom.
     music_upload_max_mb: int = 150
@@ -371,5 +378,9 @@ def load_config() -> Config:
         music_stream_ttl_seconds=_get_float("MUSIC_STREAM_TTL_SECONDS", 1800.0),
         music_max_track_seconds=_get_float("MUSIC_MAX_TRACK_SECONDS", 10800.0),
         music_allow_live=_get_bool("MUSIC_ALLOW_LIVE", False),
+        music_yt_sfx_max_seconds=_get_float("MUSIC_YT_SFX_MAX_SECONDS", 60.0),
+        music_yt_ambience_max_seconds=_get_float("MUSIC_YT_AMBIENCE_MAX_SECONDS", 1800.0),
+        music_yt_layer_max_mb=_get_int("MUSIC_YT_LAYER_MAX_MB", 40),
+        music_yt_download_timeout_seconds=_get_float("MUSIC_YT_DOWNLOAD_TIMEOUT_SECONDS", 90.0),
         music_upload_max_mb=music_upload_max_mb,
     )

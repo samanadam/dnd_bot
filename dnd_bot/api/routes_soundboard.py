@@ -57,23 +57,57 @@ async def library(request: web.Request) -> web.Response:
     return web.json_response(body)
 
 
+def _track_id(payload: dict) -> str:
+    track_id = payload.get("id")
+    if not isinstance(track_id, str) or not track_id or len(track_id) > 512:
+        raise ApiError(400, "bad_request", "id is required.")
+    return track_id
+
+
+def _source_name(payload: dict) -> str:
+    name = payload.get("source", "r2")
+    if name not in ("r2", "youtube"):
+        raise ApiError(400, "bad_request", "source must be r2 or youtube.")
+    return str(name)
+
+
+async def _resolve_layer(request: web.Request, source_name: str, kind: str, track_id: str):
+    """A playable local file for one sound.
+
+    A bucket sound must be in its folder's live listing. A YouTube sound is
+    downloaded once into the music cache by the resolver, which validates the
+    link and every limit itself.
+    """
+    source = _source(request, source_name)
+    if source_name == "youtube":
+        return await source.fetch_layer(track_id, kind)
+    allowed = {track.id for track in await source.browse_folder(kind)}
+    if track_id not in allowed:
+        raise ApiError(404, "not_found", f"No such {kind} sound.")
+    return await source.resolve(track_id)
+
+
+@routes.post("/api/v1/soundboard/prepare")
+async def prepare(request: web.Request) -> web.Response:
+    """Download a YouTube sound ahead of time so it starts at once later."""
+    payload = await read_json(request)
+    kind = _kind(payload.get("kind"))
+    track = await _resolve_layer(request, "youtube", kind, _track_id(payload))
+    return web.json_response(track.to_dict())
+
+
 @routes.post("/api/v1/soundboard/play")
 async def play(request: web.Request) -> web.Response:
     payload = await read_json(request)
     kind = _kind(payload.get("kind"))
-    track_id = payload.get("id")
-    if not isinstance(track_id, str) or not track_id or len(track_id) > 512:
-        raise ApiError(400, "bad_request", "id is required.")
+    track_id = _track_id(payload)
+    source_name = _source_name(payload)
     volume = _volume(payload.get("volume"))
     channel_id = payload.get("channel_id")
     if channel_id is not None and not (isinstance(channel_id, str) and channel_id.isdigit()):
         raise ApiError(400, "bad_request", "channel_id must be a numeric id.")
 
-    source = _source(request, "r2")
-    allowed = {track.id for track in await source.browse_folder(kind)}
-    if track_id not in allowed:
-        raise ApiError(404, "not_found", f"No such {kind} sound.")
-    track = await source.resolve(track_id)
+    track = await _resolve_layer(request, source_name, kind, track_id)
 
     await _music(request).play_layer(
         request.app[CONFIG].guild_id,

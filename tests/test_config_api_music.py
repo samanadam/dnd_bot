@@ -131,3 +131,21 @@ def test_music_over_ytdlp_alone_loads(env):
     config = load_config()
     assert config.music_enabled is True
     assert config.music_youtube_enabled is True
+
+
+def test_youtube_sound_limits_have_safe_defaults(env):
+    config = load_config()
+    assert config.music_yt_sfx_max_seconds == 60.0
+    assert config.music_yt_ambience_max_seconds == 1800.0
+    assert config.music_yt_layer_max_mb == 40
+    assert config.music_yt_download_timeout_seconds == 90.0
+
+
+def test_youtube_sound_limits_can_be_tuned(env):
+    env.setenv("MUSIC_YT_SFX_MAX_SECONDS", "30")
+    env.setenv("MUSIC_YT_AMBIENCE_MAX_SECONDS", "600")
+    env.setenv("MUSIC_YT_LAYER_MAX_MB", "10")
+    env.setenv("MUSIC_YT_DOWNLOAD_TIMEOUT_SECONDS", "45")
+    config = load_config()
+    assert (config.music_yt_sfx_max_seconds, config.music_yt_ambience_max_seconds) == (30.0, 600.0)
+    assert (config.music_yt_layer_max_mb, config.music_yt_download_timeout_seconds) == (10, 45.0)

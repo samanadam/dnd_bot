@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from dnd_bot.api.server import build_app
 from dnd_bot.config import Config
 from dnd_bot.music import MusicError, Track
+from dnd_bot.ytdlp import TrackResolutionError
 
 TOKEN = "t" * 32
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -33,9 +34,29 @@ class FakeSource:
         return Track(track_id, track_id.rsplit("/", 1)[-1], "r2", "/cache/x.ogg")
 
 
+WATCH = "https://www.youtube.com/watch?v=abcdefghijk"
+
+
+class FakeYouTube:
+    name = "youtube"
+    enabled = True
+
+    def __init__(self):
+        self.fetched = []
+        self.error = None
+
+    async def fetch_layer(self, track_id, kind):
+        self.fetched.append((track_id, kind))
+        if self.error:
+            raise self.error
+        return Track(
+            track_id, "thunder", "youtube", "/cache/music/youtube/yt_abcdefghijk.m4a", 12.0
+        )
+
+
 class FakeMusic:
     def __init__(self):
-        self.sources = {"r2": FakeSource()}
+        self.sources = {"r2": FakeSource(), "youtube": FakeYouTube()}
         self.calls = []
         self.error = None
 
@@ -156,3 +177,110 @@ async def test_volume(client):
 
 async def test_needs_the_token(client):
     assert (await client.get("/api/v1/soundboard")).status == 401
+
+
+# -- YouTube sounds ----------------------------------------------------------
+
+
+async def test_a_youtube_sound_is_fetched_then_played(client):
+    response = await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "sfx", "source": "youtube", "id": WATCH, "volume": 0.7},
+        headers=AUTH,
+    )
+    assert response.status == 200
+    assert client.music.sources["youtube"].fetched == [(WATCH, "sfx")]
+    assert client.music.calls == [("play", WATCH, "sfx", 0.7, None)]
+
+
+async def test_youtube_sounds_skip_the_bucket_listing(client):
+    # Not in any R2 folder, and still fine: the resolver is the authority.
+    client.music.sources["r2"].folders = {"ambience": [], "sfx": []}
+    response = await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "ambience", "source": "youtube", "id": WATCH},
+        headers=AUTH,
+    )
+    assert response.status == 200
+
+
+async def test_the_default_source_is_still_the_bucket(client):
+    await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "sfx", "id": "music/sfx/door.ogg"},
+        headers=AUTH,
+    )
+    assert client.music.sources["youtube"].fetched == []
+
+
+@pytest.mark.parametrize("source", ["soundcloud", "", None, 5, ["youtube"], "YouTube"])
+async def test_an_unknown_source_is_400(client, source):
+    response = await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "sfx", "source": source, "id": WATCH},
+        headers=AUTH,
+    )
+    assert response.status == 400
+    assert client.music.calls == []
+
+
+async def test_a_refused_link_is_a_502_and_nothing_plays(client):
+    client.music.sources["youtube"].error = TrackResolutionError("That link is a playlist.")
+    response = await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "sfx", "source": "youtube", "id": "https://www.youtube.com/playlist?list=x"},
+        headers=AUTH,
+    )
+    assert response.status == 502
+    assert client.music.calls == []
+
+
+async def test_youtube_being_off_is_a_503(client):
+    del client.music.sources["youtube"]
+    response = await client.post(
+        "/api/v1/soundboard/play",
+        json={"kind": "sfx", "source": "youtube", "id": WATCH},
+        headers=AUTH,
+    )
+    assert response.status == 503
+
+
+async def test_prepare_downloads_without_playing(client):
+    response = await client.post(
+        "/api/v1/soundboard/prepare", json={"kind": "sfx", "id": WATCH}, headers=AUTH
+    )
+    assert response.status == 200
+    body = await response.json()
+    assert body == {
+        "id": WATCH,
+        "title": "thunder",
+        "source": "youtube",
+        "duration_seconds": 12.0,
+    }
+    assert "uri" not in body and "cache" not in str(body)
+    assert client.music.calls == []
+    assert client.music.sources["youtube"].fetched == [(WATCH, "sfx")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"kind": "music", "id": WATCH}, {"kind": "sfx"}, {"kind": "sfx", "id": ""}, {"id": WATCH}],
+)
+async def test_prepare_rejects_bad_bodies(client, body):
+    response = await client.post("/api/v1/soundboard/prepare", json=body, headers=AUTH)
+    assert response.status == 400
+    assert client.music.sources["youtube"].fetched == []
+
+
+async def test_prepare_reports_a_failed_download(client):
+    client.music.sources["youtube"].error = TrackResolutionError("That video is private.")
+    response = await client.post(
+        "/api/v1/soundboard/prepare", json={"kind": "sfx", "id": WATCH}, headers=AUTH
+    )
+    assert response.status == 502
+    assert "private" in (await response.json())["error"]["message"]
+
+
+async def test_prepare_needs_the_token(client):
+    response = await client.post("/api/v1/soundboard/prepare", json={"kind": "sfx", "id": WATCH})
+    assert response.status == 401
