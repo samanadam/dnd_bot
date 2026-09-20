@@ -177,7 +177,7 @@ async def assign(request: web.Request) -> web.Response:
         raise _bad("campaign_id must be a campaign id or null.")
     db = _db(request)
     row = await db.get_session(session_id)
-    if row is None:
+    if row is None or row.get("deleted_at"):
         raise ApiError(404, "not_found", "No such session.")
     if not row["completed"]:
         raise ApiError(409, "conflict", "That session is still being recorded.")

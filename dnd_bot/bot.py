@@ -24,6 +24,7 @@ from .notify import DiscordNotifier
 from .r2 import OUTBOX_PREFIX, R2Error, R2Store
 from .recorder import SessionManager
 from .recovery import scan_for_recoverable
+from .session_admin import purge_expired
 from .startup import READY_TIMEOUT_EXIT_CODE, start_until_stopped, supervise_ready
 from .timeutil import to_iso, utcnow
 from .tracks import build_sources
@@ -290,6 +291,7 @@ class DnDBot(discord.Bot):
         while True:
             try:
                 await run_cleanup(self.db, self.config, self.notifier)
+                await purge_expired(self.db, self.config, self.store, None)
             except Exception:  # noqa: BLE001 - keep the loop alive
                 log.exception("Cleanup pass failed")
             await asyncio.sleep(self.config.cleanup_interval_seconds)

@@ -168,7 +168,9 @@ class InboxDelivery:
             f"Transcript ready for session **{name}** (`{session_id}`)\n"
             f"{summarize(transcript_md)}"
         )
-        await self.notifier.notify_session(session, message, transcript_md)
+        # A session in the trash still gets its transcript filed, but nobody is pinged about it.
+        if not session.get("deleted_at"):
+            await self.notifier.notify_session(session, message, transcript_md)
 
         expires_at = utcnow() + timedelta(days=self.config.audio_retention_days)
         await self.db.update_session(session_id, transcribed=1, audio_expires_at=to_iso(expires_at))

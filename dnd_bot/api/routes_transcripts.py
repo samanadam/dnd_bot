@@ -37,7 +37,7 @@ async def transcript(request: web.Request) -> web.Response:
     limit = _int(request, "limit", DEFAULT_PAGE, 1, MAX_PAGE)
 
     row = await request.app[BOT].db.get_session(session_id)
-    if row is None:
+    if row is None or row.get("deleted_at"):
         raise ApiError(404, "not_found", "No such session.")
 
     reader: TranscriptReader = request.app[TRANSCRIPTS]

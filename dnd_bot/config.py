@@ -59,6 +59,8 @@ class Config:
     data_dir: Path = Path("/data")
     audio_format: str = "opus"
     audio_retention_days: int = 7
+    # A deleted session stays in the trash this long before it is removed for good.
+    trash_retention_days: int = 7
     disk_warning_threshold_mb: int = 2000
     # How long a session is assumed to run, for the free-space check at
     # /session start. Raw capture is ~0.7 GB per speaker-hour.
@@ -334,6 +336,7 @@ def load_config() -> Config:
         data_dir=Path(_get("DATA_DIR", "/data")),
         audio_format=audio_format,
         audio_retention_days=_get_int("AUDIO_RETENTION_DAYS", 7),
+        trash_retention_days=_get_int("TRASH_RETENTION_DAYS", 7),
         disk_warning_threshold_mb=_get_int("DISK_WARNING_THRESHOLD_MB", 2000),
         expected_session_hours=_get_float("EXPECTED_SESSION_HOURS", 4.0),
         admin_user_id=admin_user_id,

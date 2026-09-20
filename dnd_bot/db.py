@@ -223,15 +223,24 @@ class Database:
         elif campaign is not None:
             clause, args = " AND s.campaign_id = ?", [campaign]
         cursor = await self.conn.execute(
-            f"{self._SESSION_SELECT} WHERE s.completed = 1 AND s.cancelled = 0{clause} "
+            f"{self._SESSION_SELECT} WHERE s.completed = 1 AND s.cancelled = 0 "
+            f"AND s.deleted_at IS NULL{clause} "
             "ORDER BY s.start_time DESC LIMIT ?",
             (*args, limit),
         )
         return [dict(row) for row in await cursor.fetchall()]
 
+    async def list_trashed_sessions(self) -> list[dict[str, Any]]:
+        """Sessions waiting in the trash, most recently deleted first."""
+        cursor = await self.conn.execute(
+            f"{self._SESSION_SELECT} WHERE s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
     async def list_open_sessions(self) -> list[dict[str, Any]]:
         cursor = await self.conn.execute(
-            "SELECT * FROM sessions WHERE completed = 0 AND cancelled = 0 ORDER BY start_time"
+            "SELECT * FROM sessions WHERE completed = 0 AND cancelled = 0 "
+            "AND deleted_at IS NULL ORDER BY start_time"
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -317,6 +326,7 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT c.*, COUNT(s.id) AS session_count FROM campaigns c "
             "LEFT JOIN sessions s ON s.campaign_id = c.id AND s.completed = 1 AND s.cancelled = 0 "
+            "AND s.deleted_at IS NULL "
             f"{where}GROUP BY c.id ORDER BY c.name COLLATE NOCASE"
         )
         return [dict(row) for row in await cursor.fetchall()]
@@ -518,7 +528,7 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT q.session_id, q.queued_at, q.status, s.name FROM transcription_queue q "
             "LEFT JOIN sessions s ON s.id = q.session_id "
-            "WHERE q.status != 'done' ORDER BY q.queued_at"
+            "WHERE q.status != 'done' AND s.deleted_at IS NULL ORDER BY q.queued_at"
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -540,7 +550,9 @@ class Database:
     async def pending_count(self) -> int:
         """Sessions staged but not yet transcribed."""
         cursor = await self.conn.execute(
-            "SELECT COUNT(*) AS n FROM transcription_queue WHERE status != 'done'"
+            "SELECT COUNT(*) AS n FROM transcription_queue q "
+            "LEFT JOIN sessions s ON s.id = q.session_id "
+            "WHERE q.status != 'done' AND s.deleted_at IS NULL"
         )
         row = await cursor.fetchone()
         return int(row["n"]) if row else 0

@@ -211,7 +211,7 @@ class TranscriptIndex:
             "s.name AS session_name, s.start_time, s.campaign_id, c.name AS campaign_name "
             "FROM transcript_fts f JOIN sessions s ON s.id = f.session_id "
             "LEFT JOIN campaigns c ON c.id = s.campaign_id "
-            f"WHERE transcript_fts MATCH ?{clause} ORDER BY rank LIMIT ?",
+            f"WHERE transcript_fts MATCH ?{clause} AND s.deleted_at IS NULL ORDER BY rank LIMIT ?",
             (expression, *args, limit),
         )
         hits = [

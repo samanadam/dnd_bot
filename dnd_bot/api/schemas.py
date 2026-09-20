@@ -60,6 +60,11 @@ def session_summary(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def trashed_session(row: Mapping[str, Any], purge_at: str | None) -> dict[str, Any]:
+    """A session in the trash: the usual summary, plus when it goes for good."""
+    return {**session_summary(row), "deleted_at": row["deleted_at"], "purge_at": purge_at}
+
+
 def campaign(row: Mapping[str, Any]) -> dict[str, Any]:
     """One campaign. `channel_id` is the only id, and the portal needs it."""
     return {

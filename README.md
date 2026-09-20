@@ -160,6 +160,7 @@ Copy `.env.example` to `.env`. Every setting is read from the environment.
 | `DATA_DIR` | `/data` | Path inside the container. Leave alone. |
 | `AUDIO_FORMAT` | `opus` | ~32× smaller than `wav`, no measured accuracy cost. |
 | `AUDIO_RETENTION_DAYS` | `7` | Days before audio still here is deleted. |
+| `TRASH_RETENTION_DAYS` | `7` | Days a deleted session waits in the trash before it is removed for good. |
 | `DISK_WARNING_THRESHOLD_MB` | `5000` | Warn below this much free space. |
 | `EXPECTED_SESSION_HOURS` | `4` | Session length assumed by the free-space check at `/session start`. |
 | `ADMIN_USER_ID` | — | Fallback DM recipient for warnings and fatal errors. Always privileged. |
@@ -523,7 +524,10 @@ list.
 | GET | `/api/v1/sessions?limit=25&campaign=` | Finished sessions. `campaign` is a campaign id or `unassigned`. |
 | POST | `/api/v1/sessions/{id}/campaign` | `{campaign_id}` (an id, or `null` to unassign). Finished sessions only. |
 | POST | `/api/v1/sessions/{id}/update` | `{name}`: rename a session (1-100 characters). Not while it is recording. |
-| POST | `/api/v1/sessions/{id}/delete` | `{confirm_id}` must equal the session id. Permanently removes the audio, transcript, export, staged and bucket copies, search entries and database rows. Refused (409) while recording or while the transcriber is working on it. The transcriber's own archive is not touched. Rate limited like recording calls. |
+| GET | `/api/v1/sessions/trash` | Sessions in the trash, with when each is removed for good (`purge_at`). |
+| POST | `/api/v1/sessions/{id}/trash` | `{confirm_id}` must equal the session id. Hides the session everywhere (list, search, queue, campaign counts) and keeps every file, so it can be restored. Refused while it is recording. |
+| POST | `/api/v1/sessions/{id}/restore` | `{confirm_id}`. Takes a session out of the trash. |
+| POST | `/api/v1/sessions/{id}/purge` | `{confirm_id}`. Only for a session already in the trash. Permanently removes the audio, transcript, export, staged and bucket copies, search entries and database rows. Refused (409) while the transcriber is working on it. The transcriber's own archive is not touched. Rate limited like recording calls. |
 | GET | `/api/v1/transcripts/search?q=&campaign=&limit=` | Full-text search across delivered transcripts, as they are read (after the campaign's corrections). Words only: operators are ignored. Returns `results` and `still_indexing`. |
 | GET | `/api/v1/transcription` | Sessions waiting for a transcript: `uploading` (still on the bot), `waiting` (in the bucket or with the transcriber) or `transcribing`, with `stalled` after 48 hours. |
 | POST | `/api/v1/transcription/sync` | Runs one upload pass and one download pass now. Delivery stays with the bot's own loop. |

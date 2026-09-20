@@ -1,4 +1,8 @@
-"""Removing a session for good, and everything the bot keeps about it.
+"""Trashing, restoring and removing sessions, and everything the bot keeps about them.
+
+A deleted session goes to the trash first: hidden everywhere, files untouched, and
+restorable until the retention window closes. Only then (or when someone empties it
+by hand) is it removed for good, which is the part below.
 
 Order matters. Files and remote copies go first and the database row goes last,
 so a failure part-way leaves a session that still shows in the list and can be
@@ -11,15 +15,19 @@ from here and is not touched.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from . import outbox, paths
 from .r2 import INBOX_PREFIX, OUTBOX_PREFIX
+from .search import TranscriptIndex
+from .timeutil import from_iso, to_iso, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -105,3 +113,54 @@ def remove_files(config: Any, store: Any, session_id: str) -> Removed:
         remote,
     )
     return Removed(files=files, bytes_freed=freed, remote_objects=remote)
+
+
+def purge_at(row: dict[str, Any], retention_days: int) -> datetime | None:
+    deleted = from_iso(row.get("deleted_at"))
+    return deleted + timedelta(days=retention_days) if deleted else None
+
+
+async def trash(db: Any, session_id: str) -> str:
+    """Hide a session. Returns the time it was trashed."""
+    stamp = to_iso(utcnow())
+    await db.update_session(session_id, deleted_at=stamp)
+    return stamp
+
+
+async def restore(db: Any, session_id: str) -> None:
+    await db.update_session(session_id, deleted_at=None)
+
+
+async def purge(db: Any, config: Any, store: Any, search: Any, session_id: str) -> Removed:
+    """Remove a trashed session for good. Files first, database row last."""
+    removed = await asyncio.to_thread(remove_files, config, store, session_id)
+    # The API holds the live index; the background pass has none, and forgetting
+    # only needs the database.
+    await (search or TranscriptIndex(db, None)).forget(session_id)
+    await db.delete_session(session_id)
+    return removed
+
+
+async def purge_expired(
+    db: Any, config: Any, store: Any, search: Any, now: datetime | None = None
+) -> list[str]:
+    """Remove everything that has sat in the trash past its window.
+
+    A session the transcriber is working on is skipped this round rather than
+    pulled out from under it.
+    """
+    now = now or utcnow()
+    purged: list[str] = []
+    for row in await db.list_trashed_sessions():
+        due = purge_at(row, config.trash_retention_days)
+        if due is None or due > now:
+            continue
+        if await db.session_state(row["id"]) == "transcribing":
+            continue
+        try:
+            await purge(db, config, store, search, row["id"])
+        except Exception:  # noqa: BLE001 - one stuck session must not block the rest
+            log.exception("Could not empty session %s from the trash", row["id"])
+            continue
+        purged.append(row["id"])
+    return purged
