@@ -310,7 +310,11 @@ async def test_a_search_hit_is_returned_as_the_link_that_resolve_accepts(youtube
 
 
 async def test_a_resolved_video_keeps_one_canonical_id(youtube_config):
-    info = {**INFO, "id": "yO2ldAd78Yc", "webpage_url": "https://youtube.com/watch?v=yO2ldAd78Yc&t=5"}
+    info = {
+        **INFO,
+        "id": "yO2ldAd78Yc",
+        "webpage_url": "https://youtube.com/watch?v=yO2ldAd78Yc&t=5",
+    }
     track = await resolver(youtube_config, info=info).resolve(WATCH)
     assert track.id == "https://www.youtube.com/watch?v=yO2ldAd78Yc"
 
