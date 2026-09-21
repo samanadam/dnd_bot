@@ -443,6 +443,53 @@ Music and recording share the guild's single voice connection. The recorder
 always wins — starting a session takes the connection back, and music re-attaches
 to it once the session is up.
 
+### Ambience and effects library
+
+The soundboard plays **ambience** (loops, up to 3 at once) and **effects** (one
+shot, up to 6) over the music. The library lives in the bucket and nowhere else:
+`music/ambience/` and `music/sfx/` (under `MUSIC_R2_PREFIX`). The bot only keeps a
+cache of what it has played; deleting that cache loses nothing.
+
+There are four ways to fill it:
+
+- **Bulk import** a folder from your own machine with
+  `scripts/import_sounds.py`. Lay the folder out as `ambience/` and `sfx/`, then:
+
+  ```
+  python scripts/import_sounds.py ./sounds --dry-run   # check, upload nothing
+  python scripts/import_sounds.py ./sounds
+  ```
+
+  It needs the same `.env` as `scripts/check_r2.py` and reads the folder once,
+  keeping no copy. Each file is put through the portal's upload checks: a safe
+  name, the size cap (`MUSIC_UPLOAD_MAX_MB`), audio that matches its extension,
+  ffprobe finding real audio, effects at most 2 minutes, ambience at most
+  `MUSIC_MAX_TRACK_SECONDS`. A name already in the bucket is skipped, never
+  overwritten, so re-running after adding files is safe. Anything refused is
+  listed with the reason, and one bad file never stops the rest.
+- **Upload one at a time** from the portal (`POST /api/v1/music/upload`).
+- **Play a link** from YouTube or SoundCloud with no upload at all (see below).
+- **Add objects directly** to the bucket with any S3 tool, in the same folders.
+
+Where to find sounds that are free to use. Check each sound's own licence before
+you use it: terms differ per sound and per site.
+
+- [Freesound](https://freesound.org) — community sounds, each tagged with its own
+  licence. Filter to CC0 for no strings; CC-BY needs credit.
+- [Sonniss](https://sonniss.com/gameaudiogdc) — yearly free game-audio bundles.
+- [Pixabay](https://pixabay.com/sound-effects/) — effects and ambience under the
+  site's content licence.
+- [Tabletop Audio](https://tabletopaudio.com) — ambience made for tabletop games,
+  with its own usage terms.
+- YouTube or SoundCloud ambience mixes, through the link sources below.
+
+Tags on sounds (several per sound, changeable at any time) are kept by the
+portal, not by the bot: the bot lists files and nothing more, so it needs no
+change for them.
+
+If a licence asks for credit, keep a credits list of your own. This repository is
+public and must not hold audio, and the bucket should not be made public.
+
 ### YouTube (optional)
 
 `MUSIC_YTDLP_ENABLED=true` adds streaming through yt-dlp. It is off by default
