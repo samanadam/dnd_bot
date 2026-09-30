@@ -113,9 +113,9 @@ class DnDBot(discord.Bot):
 
         await self._start_api()
         await self._check_object_storage()
-        await self._report_recoverable()
-
         self._background_tasks += [
+            # Encoding an orphaned game takes minutes; recording must not wait.
+            asyncio.create_task(self._report_recoverable(), name="recover"),
             asyncio.create_task(self._inbox_loop(), name="inbox"),
             asyncio.create_task(self._cleanup_loop(), name="cleanup"),
             asyncio.create_task(self._backup_loop(), name="backup"),
@@ -174,18 +174,45 @@ class DnDBot(discord.Bot):
         log.info("R2 bucket %s is reachable", self.config.r2_bucket)
 
     async def _report_recoverable(self) -> None:
-        """A crash-orphaned session is worthless unless somebody is told about it."""
-        recoverable = await scan_for_recoverable(self.db, self.config.sessions_dir)
+        """Finish every session a crash or a cut-short stop left open.
+
+        Nothing is recording yet at startup, so any open session with audio on
+        disk is an orphan. Finishing it here stages it for R2 like a normal
+        stop; waiting for someone to run `/session recover` is how a session
+        sits unnoticed until its players ask where it went.
+        """
+        recoverable = await scan_for_recoverable(
+            self.db, self.config.sessions_dir, self.config.audio_format
+        )
         if not recoverable:
             return
-        lines = [
-            f"{len(recoverable)} session(s) were left unfinished by a crash or hard restart. "
-            "Their audio is still on disk - finish each one with `/session recover <id>`:"
-        ]
-        lines += [
-            f"- `{row['id']}` {row.get('name') or 'unnamed'} (#{row.get('channel_name')})"
-            for row in recoverable[:10]
-        ]
+        finished: list[str] = []
+        failed: list[str] = []
+        for row in recoverable:
+            label = f"`{row['id']}` {row.get('name') or 'unnamed'} (#{row.get('channel_name')})"
+            try:
+                result = await self.manager.recover(row["id"])
+            except Exception as exc:  # noqa: BLE001 - one bad session must not block the rest
+                log.exception("Could not recover session %s on startup", row["id"])
+                failed.append(f"- {label}: {exc}")
+                continue
+            log.info("Recovered session %s on startup (queued=%s)", row["id"], result.enqueued)
+            if result.enqueued:
+                finished.append(f"- {label}: {len(result.speakers)} speaker(s), queued")
+            else:
+                failed.append(f"- {label}: {'; '.join(result.warnings) or 'not queued'}")
+        lines: list[str] = []
+        if finished:
+            lines.append(
+                f"Finished {len(finished)} session(s) a crash or interrupted stop left open:"
+            )
+            lines += finished[:10]
+        if failed:
+            lines.append(
+                f"{len(failed)} session(s) could not be finished automatically. Their audio "
+                "is still on disk - retry with `/session recover <id>`:"
+            )
+            lines += failed[:10]
         message = "\n".join(lines)
         for row in recoverable[:1]:
             await self.notifier.notify_session(row, message)

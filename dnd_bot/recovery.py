@@ -1,8 +1,8 @@
 """Crash recovery.
 
 A session row stays `completed = 0` until it is properly stopped. On startup we
-list every such row that still has raw audio on disk so a human can finish it
-with `/session recover <id>`.
+find every such row that still has audio on disk - raw captures, or tracks a
+stop encoded but never staged - and the bot finishes each one on startup.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from .finalize import has_raw_audio
+from .finalize import has_recoverable_audio
 
 log = logging.getLogger(__name__)
 
@@ -34,9 +34,13 @@ def find_recoverable(
     return recoverable
 
 
-async def scan_for_recoverable(db, sessions_root: Path) -> list[dict[str, Any]]:
+async def scan_for_recoverable(
+    db, sessions_root: Path, audio_format: str = "opus"
+) -> list[dict[str, Any]]:
     rows = await db.list_open_sessions()
-    recoverable = find_recoverable(rows, lambda sid: has_raw_audio(sessions_root, sid))
+    recoverable = find_recoverable(
+        rows, lambda sid: has_recoverable_audio(sessions_root, sid, audio_format)
+    )
     for row in recoverable:
         log.warning(
             "Recoverable session %s (%s in #%s) - run /session recover %s",

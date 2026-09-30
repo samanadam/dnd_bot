@@ -371,6 +371,107 @@ async def test_recover_finalizes_a_session_a_crash_left_open(manager):
     assert await scan_for_recoverable(db, config.sessions_dir) == []
 
 
+@needs_ffmpeg
+async def test_a_stop_whose_caller_gives_up_still_finishes(manager, monkeypatch):
+    """The portal timed out on a long stop, aiohttp cancelled the handler, and
+    the session was left encoded on disk but never marked complete or staged."""
+    import asyncio
+    import threading
+
+    from dnd_bot import recorder
+
+    mgr, db, config = manager
+    channel = FakeChannel([THORIN])
+    session = await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name="Uzun")
+    channel.voice_client.speak(THORIN, 0.4)
+
+    encoding = asyncio.Event()
+    # A thread event with a timeout, so a regression that encodes on the loop
+    # fails the test instead of hanging it.
+    release = threading.Event()
+    real_finalize = recorder.finalize_session_audio
+    loop = asyncio.get_running_loop()
+
+    def slow_finalize(*args, **kwargs):
+        loop.call_soon_threadsafe(encoding.set)
+        release.wait(timeout=5)
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(recorder, "finalize_session_audio", slow_finalize)
+
+    caller = asyncio.create_task(mgr.stop(1, 2))
+    await encoding.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    release.set()
+    await asyncio.gather(*list(mgr._finishing))
+
+    row = await db.get_session(session.session_id)
+    assert row["completed"] == 1
+    assert is_marked(config.outbox_dir / session.session_id, READY_MARKER)
+
+
+async def test_encoding_does_not_block_the_event_loop(manager, monkeypatch):
+    """A 3-hour game took ~8 minutes to encode on the loop, freezing Discord and
+    the API with it."""
+    import threading
+
+    from dnd_bot import recorder
+
+    mgr, _, _ = manager
+    channel = FakeChannel([THORIN])
+    await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name=None)
+    seen_threads: list[bool] = []
+
+    def record_thread(*args, **kwargs):
+        seen_threads.append(threading.current_thread() is threading.main_thread())
+        return [], []
+
+    monkeypatch.setattr(recorder, "finalize_session_audio", record_thread)
+    await mgr.stop(1, 2)
+
+    assert seen_threads == [False]
+
+
+@needs_ffmpeg
+async def test_recover_stages_tracks_a_cut_short_stop_already_encoded(manager):
+    """Exactly the state the lost 28 Sept game was in: tracks encoded, raw
+    capture consumed, row still open."""
+    mgr, db, config = manager
+    channel = FakeChannel([THORIN, ELENYA])
+    session = await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name="Kayip")
+    channel.voice_client.speak(THORIN, 0.4)
+    channel.voice_client.speak(ELENYA, 0.4)
+    session.sink.cleanup()
+    mgr.active.clear()
+    if session.monitor_task is not None:
+        session.monitor_task.cancel()
+
+    from dnd_bot.finalize import finalize_session_audio
+    from dnd_bot.recovery import scan_for_recoverable
+
+    finalize_session_audio(
+        config.sessions_dir, session.session_id, config.audio_format, labels=session.labels
+    )
+    assert not list((config.sessions_dir / session.session_id / "audio" / "raw").glob("*.pcm"))
+
+    recoverable = await scan_for_recoverable(db, config.sessions_dir, config.audio_format)
+    assert [r["id"] for r in recoverable] == [session.session_id]
+
+    result = await mgr.recover(session.session_id)
+
+    assert result.enqueued, result.warnings
+    assert sorted(result.speakers) == ["Thorin", "aylin"]
+    staged = config.outbox_dir / session.session_id
+    assert is_marked(staged, READY_MARKER)
+    assert sorted(p.name for p in staged.glob("*.opus")) == ["Thorin_10.opus", "aylin_11.opus"]
+    row = await db.get_session(session.session_id)
+    assert row["completed"] == 1
+    assert row["end_time"] is not None
+    assert await scan_for_recoverable(db, config.sessions_dir, config.audio_format) == []
+
+
 async def test_recover_refuses_a_session_that_is_still_recording(manager):
     mgr, _, _ = manager
     channel = FakeChannel([THORIN])

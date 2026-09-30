@@ -12,7 +12,7 @@ import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import discord
@@ -22,7 +22,7 @@ from .campaigns import prompt_hints
 from .config import Config
 from .contract import track_user_id
 from .db import Database
-from .finalize import finalize_session_audio
+from .finalize import finalize_session_audio, finalized_tracks, raw_captures
 from .ids import new_session_id, short_id
 from .labels import resolve_label
 from .outbox import publish
@@ -115,6 +115,12 @@ class SessionManager:
         self.config = config
         self.active: dict[SessionKey, ActiveSession] = {}
         self._locks: dict[SessionKey, asyncio.Lock] = {}
+        # Stops, cancels and recoveries in flight. They outlive whoever asked
+        # for them (see _run_to_completion), so something has to hold them.
+        self._finishing: set[asyncio.Task] = set()
+        # Sessions whose audio is being encoded or staged right now, so a
+        # recover cannot run over a stop that is still working on the files.
+        self._finalizing: set[str] = set()
         # Set by the bot when music is configured. Recording never depends on
         # it: every call below is guarded and swallowed, because a missing song
         # is a nuisance and a lost session is not.
@@ -130,6 +136,20 @@ class SessionManager:
 
     def sessions_in_guild(self, guild_id: int) -> list[ActiveSession]:
         return [s for s in self.active.values() if s.guild_id == guild_id]
+
+    async def _run_to_completion(self, coro):
+        """Await `coro`, but let it finish even if the caller is cancelled.
+
+        The HTTP API cancels a handler when the portal stops waiting, and a
+        stop of a long game spends minutes encoding. Cut short after the encode
+        but before the row is marked complete, the session vanished from every
+        list while its audio sat unstaged on disk. So the work runs in its own
+        task: a cancelled caller stops waiting, the work does not.
+        """
+        task = asyncio.create_task(coro)
+        self._finishing.add(task)
+        task.add_done_callback(self._finishing.discard)
+        return await asyncio.shield(task)
 
     async def _resolve_members(
         self, channel: discord.VoiceChannel, campaign_id: str | None = None
@@ -533,6 +553,14 @@ class SessionManager:
     async def stop(
         self, guild_id: int, channel_id: int, reason: str = "manual"
     ) -> StopResult | None:
+        # The auto-stop and reconnect tasks call this themselves; they must not
+        # be cancelled out from under their own stop.
+        caller = asyncio.current_task()
+        return await self._run_to_completion(self._stop(guild_id, channel_id, reason, caller))
+
+    async def _stop(
+        self, guild_id: int, channel_id: int, reason: str, caller: asyncio.Task | None
+    ) -> StopResult | None:
         key = (guild_id, channel_id)
         async with self.lock_for(key):
             session = self.active.get(key)
@@ -540,61 +568,76 @@ class SessionManager:
                 return None
             session.stopping = True
             self.active.pop(key, None)
+            self._finalizing.add(session.session_id)
+            try:
+                return await self._finish(session, reason, caller)
+            finally:
+                self._finalizing.discard(session.session_id)
 
-            for task in (session.alone_task, session.monitor_task):
-                if task is not None and task is not asyncio.current_task():
-                    task.cancel()
+    async def _finish(
+        self, session: ActiveSession, reason: str, caller: asyncio.Task | None
+    ) -> StopResult:
+        for task in (session.alone_task, session.monitor_task):
+            if task is not None and task is not caller:
+                task.cancel()
 
-            # The connection is about to go away. Telling music first means it
-            # goes quiet and keeps its queue, instead of failing to start the
-            # next track on a disconnected client.
-            await self._music_release(session.guild_id, "recording_stopped")
-            await self._teardown_voice(session)
+        # The connection is about to go away. Telling music first means it
+        # goes quiet and keeps its queue, instead of failing to start the
+        # next track on a disconnected client.
+        await self._music_release(session.guild_id, "recording_stopped")
+        await self._teardown_voice(session)
 
-            written, warnings = finalize_session_audio(
-                self.config.sessions_dir,
-                session.session_id,
-                self.config.audio_format,
-                labels=session.labels,
-            )
-            end_time = utcnow()
-            await self.db.set_offsets(session.session_id, session.offsets)
-            await self.db.update_session(
-                session.session_id,
-                end_time=to_iso(end_time),
-                completed=1,
-            )
-            enqueued = False
-            if written:
-                row = await self.db.get_session(session.session_id)
-                staging_warnings = await self._stage_for_transcription(row)
-                warnings += staging_warnings
-                if not staging_warnings:
-                    await self.db.mark_exported(session.session_id)
-                    enqueued = True
-            else:
-                warnings.append("No audio was captured, so there is nothing to transcribe.")
+        # ffmpeg over hours of audio per speaker takes minutes. On the event
+        # loop that froze the whole bot - Discord heartbeat and API included -
+        # long enough for the portal to give up on the request.
+        written, warnings = await asyncio.to_thread(
+            finalize_session_audio,
+            self.config.sessions_dir,
+            session.session_id,
+            self.config.audio_format,
+            labels=session.labels,
+        )
+        end_time = utcnow()
+        await self.db.set_offsets(session.session_id, session.offsets)
+        await self.db.update_session(
+            session.session_id,
+            end_time=to_iso(end_time),
+            completed=1,
+        )
+        enqueued = False
+        if written:
+            row = await self.db.get_session(session.session_id)
+            staging_warnings = await self._stage_for_transcription(row)
+            warnings += staging_warnings
+            if not staging_warnings:
+                await self.db.mark_exported(session.session_id)
+                enqueued = True
+        else:
+            warnings.append("No audio was captured, so there is nothing to transcribe.")
 
-            log.info(
-                "Session %s stopped (reason=%s, speakers=%s, queued=%s)",
-                session.session_id,
-                reason,
-                len(written),
-                enqueued,
-            )
-            return StopResult(
-                session_id=session.session_id,
-                name=session.name,
-                duration_seconds=session.elapsed_seconds(end_time),
-                speakers=sorted(
-                    session.labels.get(track_user_id(p), track_user_id(p)) for p in written
-                ),
-                warnings=warnings,
-                enqueued=enqueued,
-            )
+        log.info(
+            "Session %s stopped (reason=%s, speakers=%s, queued=%s)",
+            session.session_id,
+            reason,
+            len(written),
+            enqueued,
+        )
+        return StopResult(
+            session_id=session.session_id,
+            name=session.name,
+            duration_seconds=session.elapsed_seconds(end_time),
+            speakers=sorted(
+                session.labels.get(track_user_id(p), track_user_id(p)) for p in written
+            ),
+            warnings=warnings,
+            enqueued=enqueued,
+        )
 
     async def cancel(self, guild_id: int, channel_id: int) -> str | None:
         """Stop and discard: audio is deleted, nothing is queued."""
+        return await self._run_to_completion(self._cancel(guild_id, channel_id))
+
+    async def _cancel(self, guild_id: int, channel_id: int) -> str | None:
         key = (guild_id, channel_id)
         async with self.lock_for(key):
             session = self.active.get(key)
@@ -666,6 +709,9 @@ class SessionManager:
 
     async def shutdown_all(self) -> list[StopResult]:
         """SIGTERM path: flush every live session to disk before the process dies."""
+        # A stop whose caller already gave up may still be running; let it land.
+        if self._finishing:
+            await asyncio.gather(*list(self._finishing), return_exceptions=True)
         results: list[StopResult] = []
         for key in list(self.active):
             try:
@@ -680,21 +726,53 @@ class SessionManager:
     # -- recovery ----------------------------------------------------------
 
     async def recover(self, session_id: str) -> StopResult:
-        """Finalize and enqueue a session left open by a crash."""
+        """Finalize and enqueue a session left open by a crash or a cut-short stop."""
+        return await self._run_to_completion(self._recover(session_id))
+
+    async def _recover(self, session_id: str) -> StopResult:
         row = await self.db.get_session(session_id)
         if row is None:
             raise RecordingError(f"No session found with id `{session_id}`.")
         if any(s.session_id == session_id for s in self.active.values()):
             raise RecordingError("That session is still recording - use `/session stop`.")
+        if session_id in self._finalizing:
+            raise RecordingError("That session is being stopped right now; give it a minute.")
+
+        self._finalizing.add(session_id)
+        try:
+            return await self._recover_audio(session_id, row)
+        finally:
+            self._finalizing.discard(session_id)
+
+    async def _recover_audio(self, session_id: str, row: dict[str, Any]) -> StopResult:
+        sessions_root = self.config.sessions_dir
+        audio_format = self.config.audio_format
+        # When the audio was last written is the best record of when play
+        # ended; "now" can be days later.
+        last_write = max(
+            (
+                p.stat().st_mtime
+                for p in raw_captures(sessions_root, session_id)
+                or finalized_tracks(sessions_root, session_id, audio_format)
+            ),
+            default=None,
+        )
 
         labels: dict[str, str] = json.loads(row.get("participants_json") or "{}")
-        written, warnings = finalize_session_audio(
-            self.config.sessions_dir, session_id, self.config.audio_format, labels=labels
+        written, warnings = await asyncio.to_thread(
+            finalize_session_audio, sessions_root, session_id, audio_format, labels=labels
+        )
+        # A stop cut short after encoding already turned the raw capture into
+        # finished tracks; those are the session now.
+        written = sorted(
+            set(written) | set(finalized_tracks(sessions_root, session_id, audio_format))
         )
         if not written:
             raise RecordingError(f"No recoverable audio was found for session `{session_id}`.")
 
-        end_time = row.get("end_time") or to_iso(utcnow())
+        end_time = row.get("end_time") or to_iso(
+            datetime.fromtimestamp(last_write, tz=UTC) if last_write else utcnow()
+        )
         await self.db.update_session(session_id, completed=1, transcribed=0, end_time=end_time)
         row = await self.db.get_session(session_id) or row
         staging_warnings = await self._stage_for_transcription(row)

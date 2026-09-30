@@ -27,6 +27,26 @@ def has_raw_audio(sessions_root: Path, session_id: str) -> bool:
     return any(path.stat().st_size > 0 for path in raw_captures(sessions_root, session_id))
 
 
+def finalized_tracks(sessions_root: Path, session_id: str, audio_format: str) -> list[Path]:
+    """Tracks already encoded but not yet handed to the outbox.
+
+    A stop that dies between encoding and staging leaves exactly this: the raw
+    capture is gone, so only these files still hold the session.
+    """
+    audio = paths.audio_dir(sessions_root, session_id)
+    if not audio.is_dir():
+        return []
+    return sorted(
+        p for p in audio.glob(f"*.{audio_format}") if p.is_file() and p.stat().st_size > 0
+    )
+
+
+def has_recoverable_audio(sessions_root: Path, session_id: str, audio_format: str) -> bool:
+    return has_raw_audio(sessions_root, session_id) or bool(
+        finalized_tracks(sessions_root, session_id, audio_format)
+    )
+
+
 def finalize_session_audio(
     sessions_root: Path,
     session_id: str,
