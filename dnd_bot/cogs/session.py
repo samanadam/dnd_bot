@@ -124,6 +124,33 @@ class SessionCog(commands.Cog):
             lines.append("Warnings: " + "; ".join(result.warnings))
         await ctx.respond("\n".join(lines))
 
+    @session.command(
+        name="split",
+        description="Save the game so far and carry on in a new session, without leaving",
+    )
+    async def split(self, ctx: discord.ApplicationContext) -> None:
+        await ctx.defer()
+        channel = _voice_channel_of(ctx)
+        if channel is None:
+            await ctx.respond("Join the voice channel whose session you want to split.")
+            return
+        if self.manager.get(ctx.guild_id, channel.id) is None:
+            await ctx.respond(f"No session is being recorded in **{channel.name}**.")
+            return
+        try:
+            result = await self.manager.split(channel=channel, reason="manual")
+        except RecordingError as exc:
+            await ctx.respond(str(exc))
+            return
+        lines = [
+            f"Split! Now recording **{result.session.name}** (`{result.session.session_id}`) "
+            "- nobody needs to rejoin.",
+            f"**{result.previous_name}** (`{result.previous_id}`) is being saved. "
+            "Its transcript will be posted here once it comes back.",
+        ]
+        lines += result.session.warnings
+        await ctx.respond("\n".join(lines))
+
     @session.command(name="cancel", description="Stop and discard your channel's session")
     async def cancel(self, ctx: discord.ApplicationContext) -> None:
         await ctx.defer()

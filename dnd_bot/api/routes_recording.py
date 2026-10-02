@@ -112,6 +112,31 @@ async def stop(request: web.Request) -> web.Response:
     return web.json_response(_stop_result(result))
 
 
+@routes.post("/api/v1/recording/split")
+async def split(request: web.Request) -> web.Response:
+    """Close this part of the game and carry on recording as the next one.
+
+    Returns as soon as the next part is recording; the part just closed is
+    encoded and handed over in the background.
+    """
+    payload = await read_json(request)
+    channel = _voice_channel(request, require_snowflake(payload, "channel_id"))
+    manager = request.app[BOT].manager
+    if manager.get(channel.guild.id, channel.id) is None:
+        raise ApiError(404, "not_found", "Nothing is being recorded in that channel.")
+    result = await manager.split(channel=channel, reason="api")
+    log.info(
+        "Recording %s split into %s via the API", result.previous_id, result.session.session_id
+    )
+    return web.json_response(
+        {
+            "previous": {"session_id": result.previous_id, "name": result.previous_name},
+            "session": schemas.active_session(result.session),
+        },
+        status=201,
+    )
+
+
 @routes.post("/api/v1/recording/cancel")
 async def cancel(request: web.Request) -> web.Response:
     """Discards the audio. The portal must confirm before calling this."""

@@ -46,6 +46,7 @@ class FakeManager:
         self.stop_result: StopResult | None = None
         self.cancelled: str | None = None
         self.recover_error: Exception | None = None
+        self.split_error: Exception | None = None
 
     def sessions_in_guild(self, guild_id):
         return list(self.active.values())
@@ -58,6 +59,21 @@ class FakeManager:
         session = FakeSession(channel.id)
         self.active[(1, channel.id)] = session
         return session
+
+    def get(self, guild_id, channel_id):
+        return self.active.get((guild_id, channel_id))
+
+    async def split(self, *, channel, reason="manual"):
+        self.calls.append(("split", channel.id, reason))
+        if self.split_error:
+            raise self.split_error
+        session = FakeSession(channel.id)
+        session.session_id = "live-2"
+        session.name = "Live Game (part 2)"
+        self.active[(1, channel.id)] = session
+        return SimpleNamespace(
+            previous_id="live-1", previous_name="Live Game (part 1)", session=session
+        )
 
     async def stop(self, guild_id, channel_id, reason="manual"):
         self.calls.append(("stop", guild_id, channel_id, reason))
@@ -207,6 +223,41 @@ async def test_stop_records_that_the_api_asked(client, manager):
     manager.stop_result = StopResult("live-1", "Live Game", 1.0, [], [], True)
     await client.post("/api/v1/recording/stop", json={"channel_id": "2"}, headers=AUTH)
     assert manager.calls[0] == ("stop", 1, 2, "api")
+
+
+async def test_split_returns_both_parts(client, manager):
+    manager.active[(1, 2)] = FakeSession()
+    response = await client.post("/api/v1/recording/split", json={"channel_id": "2"}, headers=AUTH)
+    assert response.status == 201
+    body = await response.json()
+    assert body["previous"] == {"session_id": "live-1", "name": "Live Game (part 1)"}
+    assert body["session"]["session_id"] == "live-2"
+    assert body["session"]["channel_id"] == "2"
+    assert manager.calls[-1] == ("split", 2, "api")
+
+
+async def test_split_on_an_idle_channel_is_404(client, manager):
+    response = await client.post("/api/v1/recording/split", json={"channel_id": "2"}, headers=AUTH)
+    assert response.status == 404
+    assert not any(call[0] == "split" for call in manager.calls)
+
+
+async def test_a_refused_split_is_a_409_not_a_500(client, manager):
+    manager.active[(1, 2)] = FakeSession()
+    manager.split_error = RecordingError("Not enough disk space to carry on.")
+    response = await client.post("/api/v1/recording/split", json={"channel_id": "2"}, headers=AUTH)
+    assert response.status == 409
+    assert (await response.json())["error"]["code"] == "conflict"
+
+
+async def test_split_needs_a_token(client):
+    response = await client.post("/api/v1/recording/split", json={"channel_id": "2"})
+    assert response.status == 401
+
+
+async def test_split_needs_a_channel_id(client):
+    response = await client.post("/api/v1/recording/split", json={}, headers=AUTH)
+    assert response.status == 400
 
 
 async def test_cancel_returns_the_discarded_session_id(client, manager):

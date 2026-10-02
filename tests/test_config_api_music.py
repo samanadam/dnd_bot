@@ -149,3 +149,24 @@ def test_youtube_sound_limits_can_be_tuned(env):
     config = load_config()
     assert (config.music_yt_sfx_max_seconds, config.music_yt_ambience_max_seconds) == (30.0, 600.0)
     assert (config.music_yt_layer_max_mb, config.music_yt_download_timeout_seconds) == (10, 45.0)
+
+
+# -- break reminder ------------------------------------------------------------
+
+
+def test_the_break_reminder_defaults_to_three_hours(env):
+    env.delenv("BREAK_REMINDER_HOURS", raising=False)
+    assert load_config().break_reminder_hours == 3.0
+
+
+def test_the_break_reminder_can_be_turned_off_or_moved(env):
+    env.setenv("BREAK_REMINDER_HOURS", "0")
+    assert load_config().break_reminder_hours == 0.0
+    env.setenv("BREAK_REMINDER_HOURS", "2.5")
+    assert load_config().break_reminder_hours == 2.5
+
+
+def test_a_negative_break_reminder_is_refused(env):
+    env.setenv("BREAK_REMINDER_HOURS", "-1")
+    with pytest.raises(ConfigError, match="BREAK_REMINDER_HOURS"):
+        load_config()

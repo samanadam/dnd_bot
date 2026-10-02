@@ -87,6 +87,7 @@ members with **Manage Guild** or the role named by `SESSION_ADMIN_ROLE_ID`.
 | --- | --- |
 | `/session start [name] [campaign]` | Joins your current voice channel and starts recording. The campaign defaults to the one mapped to the channel. |
 | `/session stop` | Stops the session, encodes the audio and stages it for the transcriber. |
+| `/session split` | Saves the game so far and carries on in a new session on the same connection - nobody leaves the channel. See *Long games* below. |
 | `/session status` | The active session, or what is waiting for a transcript. |
 | `/session cancel` | Stops and **discards** the session, deleting its audio. |
 | `/session list` | Recent completed sessions with id, name, channel, date, duration. |
@@ -106,6 +107,24 @@ members with **Manage Guild** or the role named by `SESSION_ADMIN_ROLE_ID`.
 is what lets the transcriber work with no database and no Discord access — and
 why running `/character set` for every player before your first session is the
 single biggest thing you can do for transcript quality.
+
+### Long games
+
+A stop encodes every speaker's whole track, and the dashboard gives up on a stop
+after 15 minutes, so a six-hour game is better recorded in parts. Three hours in
+(`BREAK_REMINDER_HOURS`) the bot posts a break reminder in the session's text
+channel. `/session split` - or `POST /api/v1/recording/split` - then closes the
+current session and starts the next one without dropping the voice connection:
+the new session's recorder is swapped in on the live connection, so no audio is
+lost between the two, the music keeps playing, and nobody has to rejoin. The
+part just closed is encoded and handed over in the background while the next one
+records.
+
+Parts are named `<name> (part 1)`, `<name> (part 2)` and so on, share the
+campaign, text channel and language, and each gets its own transcript. A
+sentence that crosses the split is cut in two, so the reminder is a good moment
+to wait for a pause. The split is refused, and the current session keeps
+recording, if the bot is not connected or the disk cannot hold the next part.
 
 ### Campaigns
 
@@ -163,6 +182,7 @@ Copy `.env.example` to `.env`. Every setting is read from the environment.
 | `TRASH_RETENTION_DAYS` | `7` | Days a deleted session waits in the trash before it is removed for good. |
 | `DISK_WARNING_THRESHOLD_MB` | `5000` | Warn below this much free space. |
 | `EXPECTED_SESSION_HOURS` | `4` | Session length assumed by the free-space check at `/session start`. |
+| `BREAK_REMINDER_HOURS` | `3` | Post a break reminder in the session's text channel this many hours in. `0` turns it off. |
 | `ADMIN_USER_ID` | — | Fallback DM recipient for warnings and fatal errors. Always privileged. |
 | `SESSION_ADMIN_ROLE_ID` | — | Role allowed to run the 🔒 commands. Manage Guild works regardless. |
 | `STORAGE_BACKEND` | `local` | `local` (transcriber pulls over SSH) or `r2` (Cloudflare R2). |
@@ -220,8 +240,10 @@ full size** — budget ~0.7 GB per speaker-hour of free space, released when the
 session is finalized.
 
 The peak lands at `/session stop`: every speaker's raw capture is still on disk
-while the first one is encoded, and encoding writes an intermediate WAV. So a
-6-hour game with 6 speakers touches roughly **29 GB** before it starts falling.
+while the first one is encoded, with a capture's worth of headroom for the
+output. So a 6-hour game with 6 speakers is budgeted at roughly **29 GB** before
+it starts falling. That is a worst case: the capture holds only what people said,
+so a table with long pauses uses less.
 `/session start` refuses outright when the disk cannot hold
 `EXPECTED_SESSION_HOURS` at the current headcount, because running out mid-game
 does not raise — the recording would silently stop capturing.
@@ -362,7 +384,8 @@ If the bot crashes mid-session nothing is lost: restart it, look for
 ```
 /data/
   sessions/<session_id>/
-    audio/raw/<user_id>.pcm    # appended live; consumed at finalize
+    audio/raw/<user_id>.pcm    # speech only, appended live; consumed at finalize
+    audio/raw/<user_id>.gaps   # where the pauses were; put back at finalize
     transcript.md              # copied here when it comes back
     transcript.json
   outbox/<session_id>/         # staged for the transcriber
@@ -376,6 +399,12 @@ If the bot crashes mid-session nothing is lost: restart it, look for
   bot.db                       # SQLite metadata (WAL mode)
   heartbeat                    # touched every 30s; read by the healthcheck
 ```
+
+Discord sends nothing while someone is quiet, so a raw capture is only their
+speech. The pauses are noted in the `.gaps` file as they happen and put back as
+silence when the session is finalized. Each speaker's track is therefore as long
+as the session, and a timestamp in it is a timestamp in the session, including
+across a voice reconnect. Silence costs almost nothing once encoded.
 
 Schema changes go in `migrations/NNN_description.sql`; a `schema_version` table
 records what has been applied, and the runner is safe to re-run.
@@ -642,6 +671,7 @@ list.
 | GET | `/api/v1/recording` | What is recording now. |
 | POST | `/api/v1/recording/start` | `{channel_id, name?, text_channel_id?, campaign_id?}` |
 | POST | `/api/v1/recording/stop` | `{channel_id}` |
+| POST | `/api/v1/recording/split` | `{channel_id}` — closes this part and keeps recording as the next, without leaving the channel. Returns `{previous: {session_id, name}, session}` once the new part is recording; the old one is saved in the background. |
 | POST | `/api/v1/recording/cancel` | `{channel_id}` — **deletes the audio**. |
 | POST | `/api/v1/recording/recover` | `{session_id}` |
 | GET | `/api/v1/music/state` | Now playing, queue, volume, loop. |
@@ -716,9 +746,10 @@ tests, and builds the image on every push.
   case; nothing catches it mid-game.
 - One bot token records one voice channel at a time; Discord allows a single
   voice connection per account per server.
-- If a voice connection drops and recovers mid-session, the reconnected audio is
-  appended to the same track, so timestamps after the outage can drift by the
-  length of the gap.
+- Pauses are placed by when audio arrives, not by Discord's own packet
+  timestamps. A network stall is told from a pause by the burst that follows it,
+  so a stall that delivers only part of its backlog, or a pause that happens to
+  end in a burst, can leave a stretch of speech a little early or late.
 - Transcription depends on someone running the transcriber. Nothing here will
   chase them.
 - A session finished while the network is down waits on disk until the next

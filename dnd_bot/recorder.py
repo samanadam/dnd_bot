@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -26,8 +27,9 @@ from .finalize import finalize_session_audio, finalized_tracks, raw_captures
 from .ids import new_session_id, short_id
 from .labels import resolve_label
 from .outbox import publish
+from .partnames import part_name
 from .sinks import DiskSink
-from .timeutil import to_iso, utcnow
+from .timeutil import format_duration, to_iso, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +74,10 @@ class ActiveSession:
     offsets: dict[str, float] = field(default_factory=dict)
     alone_task: asyncio.Task | None = None
     monitor_task: asyncio.Task | None = None
+    reminder_task: asyncio.Task | None = None
     stopping: bool = False
+    # Which part of a split game this is. A game nobody split is part 1.
+    part: int = 1
     # Non-fatal conditions noticed at start, for the cog to pass on.
     warnings: list[str] = field(default_factory=list)
     # None means unassigned: no campaign was chosen and the channel maps to none.
@@ -104,6 +109,17 @@ class StopResult:
     speakers: list[str]
     warnings: list[str]
     enqueued: bool
+
+
+@dataclass
+class SplitResult:
+    """The session that carries on, and the one being saved behind it."""
+
+    previous_id: str
+    previous_name: str
+    session: ActiveSession
+    # Finishes when the previous part is encoded and handed over; None if that failed.
+    finishing: asyncio.Task
 
 
 class SessionManager:
@@ -325,7 +341,10 @@ class SessionManager:
                 started_by_user_id=invoker.id,
                 start_time=start_time,
                 voice_client=voice_client,
-                sink=self._build_sink(session_id, 0.0, {}),
+                # The session clock started before the connect, so the sink's
+                # offsets begin where the connect left off - the same clock a
+                # reconnected sink continues from.
+                sink=self._build_sink(session_id, (utcnow() - start_time).total_seconds(), {}),
                 labels=labels,
                 warnings=start_warnings,
                 campaign_id=campaign["id"] if campaign else None,
@@ -334,6 +353,7 @@ class SessionManager:
             self.active[key] = session
             await self._start_recording(session)
             session.monitor_task = asyncio.create_task(self._monitor_connection(session))
+            session.reminder_task = self._start_reminder(session)
             await self._music_rebind(session)
             log.info("Session %s started in #%s by %s", session_id, channel.name, invoker.id)
             return session
@@ -369,8 +389,13 @@ class SessionManager:
     async def _register_speaker(self, session_id: str, user_id: str, offset: float) -> None:
         """Persist a newly-heard speaker's label and offset as soon as they talk."""
         session = next((s for s in self.active.values() if s.session_id == session_id), None)
+        if session is not None:
+            await self._ensure_speaker(session, user_id, offset)
+
+    async def _ensure_speaker(self, session: ActiveSession, user_id: str, offset: float) -> None:
+        session_id = session.session_id
         try:
-            if session is not None and user_id not in session.offsets:
+            if user_id not in session.offsets:
                 session.offsets[user_id] = offset
                 if user_id not in session.labels:
                     character_map = await self.db.character_map(session.campaign_id)
@@ -388,7 +413,8 @@ class SessionManager:
         except Exception:  # noqa: BLE001 - never let a callback kill the session
             log.exception("Failed registering speaker %s for %s", user_id, session_id)
 
-    async def _start_recording(self, session: ActiveSession) -> None:
+    @staticmethod
+    def _recording_finished(session: ActiveSession):
         def finished(exception: Exception | None = None) -> None:
             # py-cord 2.7 changed this callback to take the exception that ended
             # the recording, if any. A silent death here used to look exactly
@@ -401,6 +427,11 @@ class SessionManager:
                     session.session_id,
                     exc_info=exception,
                 )
+
+        return finished
+
+    async def _start_recording(self, session: ActiveSession) -> None:
+        finished = self._recording_finished(session)
 
         # connect() returns before the voice socket is actually running, and
         # start_recording refuses a client that is not connected yet. The wait
@@ -548,6 +579,190 @@ class SessionManager:
         except asyncio.CancelledError:
             return
 
+    # -- break reminder ----------------------------------------------------
+
+    def _start_reminder(self, session: ActiveSession) -> asyncio.Task | None:
+        hours = self.config.break_reminder_hours
+        if hours <= 0 or session.text_channel_id is None or self.bot is None:
+            return None
+        return asyncio.create_task(self._break_reminder(session, hours))
+
+    async def _break_reminder(self, session: ActiveSession, hours: float) -> None:
+        """Say once, a few hours in, that this is a good place to split the game."""
+        try:
+            await asyncio.sleep(max(0.0, hours * 3600 - session.elapsed_seconds()))
+            if session.stopping:
+                return
+            channel = self.bot.get_channel(session.text_channel_id or 0)
+            if channel is None:
+                return
+            await channel.send(
+                f"**{session.name}** has been recording for "
+                f"{format_duration(session.elapsed_seconds())}. A good moment for a break! "
+                "Run `/session split` to save the game so far and carry on in a new part - "
+                "nobody has to leave the voice channel."
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a missed reminder must never touch the recording
+            log.warning(
+                "Could not send the break reminder for %s", session.session_id, exc_info=True
+            )
+
+    # -- split -------------------------------------------------------------
+
+    async def split(self, *, channel: discord.VoiceChannel, reason: str = "manual") -> SplitResult:
+        """Close this part of the game and carry on recording as the next one.
+
+        The voice connection is kept: the new session's sink is swapped in on
+        the live reader, so no audio is lost between the two and nobody has to
+        wait for a re-join. The finished part is encoded and handed over in the
+        background. Anything that makes the split impossible is raised before
+        a thing has changed, and the current session keeps recording.
+        """
+        key = (channel.guild.id, channel.id)
+        async with self.lock_for(key):
+            old = self.active.get(key)
+            if old is None or old.stopping:
+                raise RecordingError(f"Nothing is being recorded in **{channel.name}**.")
+            if not old.voice_client.is_connected():
+                raise RecordingError(
+                    "I am not connected to the voice channel right now, so the session "
+                    "cannot be split. Stop it instead."
+                )
+
+            # The next part starts while this one's audio is still on disk, so the
+            # check counts it. A part is expected to be split again at the reminder.
+            hours = self.config.expected_session_hours
+            if self.config.break_reminder_hours > 0:
+                hours = min(hours, self.config.break_reminder_hours)
+            speakers = len([m for m in channel.members if not m.bot])
+            room = capacity.estimate(self.config.data_dir, speakers, hours)
+            if not room.sufficient:
+                raise RecordingError(capacity.shortfall_message(room))
+            warnings: list[str] = []
+            if not room.comfortable:
+                warnings.append(capacity.warning_message(room))
+
+            old_row = await self.db.get_session(old.session_id)
+            language = (old_row or {}).get("language") or self.config.transcribe_language
+            labels, base_labels = await self._resolve_members(channel, old.campaign_id)
+
+            start_time = utcnow()
+            session_id = new_session_id(start_time, self.config.tz)
+            part = old.part + 1
+            name = part_name(old.name, part)
+            paths.ensure_session_dirs(self.config.sessions_dir, session_id)
+            await self.db.create_session(
+                session_id=session_id,
+                name=name,
+                guild_id=old.guild_id,
+                channel_id=old.channel_id,
+                channel_name=old.channel_name,
+                text_channel_id=old.text_channel_id,
+                started_by_user_id=old.started_by_user_id,
+                start_time=to_iso(start_time),
+                participants=labels,
+                language=language,
+                campaign_id=old.campaign_id,
+                base_labels=base_labels,
+            )
+            new = ActiveSession(
+                session_id=session_id,
+                name=name,
+                guild_id=old.guild_id,
+                channel_id=old.channel_id,
+                channel_name=old.channel_name,
+                text_channel_id=old.text_channel_id,
+                started_by_user_id=old.started_by_user_id,
+                start_time=start_time,
+                voice_client=old.voice_client,
+                sink=self._build_sink(session_id, 0.0, {}),
+                labels=labels,
+                warnings=warnings,
+                campaign_id=old.campaign_id,
+                campaign_name=old.campaign_name,
+                part=part,
+            )
+            try:
+                self._swap_sink(old, new)
+            except Exception as exc:  # noqa: BLE001 - nothing has moved yet; undo and report
+                new.sink.cleanup()
+                await self.db.delete_session(session_id)
+                shutil.rmtree(paths.session_dir(self.config.sessions_dir, session_id), True)
+                log.exception("Could not switch %s to a new part", old.session_id)
+                raise RecordingError(
+                    "Could not switch to a new session; the current one is still recording."
+                ) from exc
+
+            # From here on the new part is live and nothing below can fail it.
+            old.stopping = True
+            self._finalizing.add(old.session_id)
+            self.active[key] = new
+            for task in (old.alone_task, old.monitor_task, old.reminder_task):
+                if task is not None and task is not asyncio.current_task():
+                    task.cancel()
+            try:
+                old.sink.cleanup()
+            except Exception:  # noqa: BLE001 - the new part is already recording
+                log.exception("Closing the previous part's audio failed for %s", old.session_id)
+            previous_name = part_name(old.name, old.part)
+            old.name = previous_name
+            with contextlib.suppress(Exception):
+                await self.db.update_session(old.session_id, name=previous_name)
+            new.monitor_task = asyncio.create_task(self._monitor_connection(new))
+            new.reminder_task = self._start_reminder(new)
+            if self.bot is not None:
+                self._evaluate_alone(new)
+            log.info("Session %s split into %s (reason=%s)", old.session_id, new.session_id, reason)
+
+        finishing = self._spawn(self._finish_previous(old))
+        return SplitResult(
+            previous_id=old.session_id,
+            previous_name=previous_name,
+            session=new,
+            finishing=finishing,
+        )
+
+    def _swap_sink(self, old: ActiveSession, new: ActiveSession) -> None:
+        """Point the live voice reader at the new session's sink."""
+        voice = old.voice_client
+        new.sink.init(voice)
+        # py-cord swaps the sink under the packet router's lock, so once this
+        # returns nothing is written to the old sink. It is not public API; the
+        # fallback below covers a library without it, at the cost of a restart.
+        set_sink = getattr(getattr(voice, "_reader", None), "set_sink", None)
+        if callable(set_sink):
+            set_sink(new.sink)
+            return
+        if voice.recording:
+            voice.stop_recording()
+        voice.start_recording(new.sink, self._recording_finished(new))
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """Run `coro` in the background, held so shutdown waits for it."""
+        task = asyncio.create_task(coro)
+        self._finishing.add(task)
+        task.add_done_callback(self._finishing.discard)
+        return task
+
+    async def _finish_previous(self, old: ActiveSession) -> StopResult | None:
+        """Encode and hand over the part that was just closed."""
+        try:
+            return await self._finalize(old, "split")
+        except Exception:  # noqa: BLE001 - reported to the table, never raised into nowhere
+            log.exception("Finishing %s after a split failed", old.session_id)
+            channel = self.bot.get_channel(old.text_channel_id or 0) if self.bot else None
+            if channel is not None:
+                with contextlib.suppress(discord.HTTPException, discord.Forbidden):
+                    await channel.send(
+                        f"**{old.name}** could not be saved after the split. Its audio is "
+                        f"still on disk; run `/session recover {old.session_id}`."
+                    )
+            return None
+        finally:
+            self._finalizing.discard(old.session_id)
+
     # -- stop / cancel -----------------------------------------------------
 
     async def stop(
@@ -562,6 +777,9 @@ class SessionManager:
         self, guild_id: int, channel_id: int, reason: str, caller: asyncio.Task | None
     ) -> StopResult | None:
         key = (guild_id, channel_id)
+        # The lock covers taking the session out of play and letting go of the
+        # voice connection - nothing else. Encoding takes minutes, and holding
+        # the lock through it kept the next session in this channel waiting.
         async with self.lock_for(key):
             session = self.active.get(key)
             if session is None:
@@ -570,14 +788,18 @@ class SessionManager:
             self.active.pop(key, None)
             self._finalizing.add(session.session_id)
             try:
-                return await self._finish(session, reason, caller)
-            finally:
+                await self._release(session, caller)
+            except BaseException:
                 self._finalizing.discard(session.session_id)
+                raise
+        try:
+            return await self._finalize(session, reason)
+        finally:
+            self._finalizing.discard(session.session_id)
 
-    async def _finish(
-        self, session: ActiveSession, reason: str, caller: asyncio.Task | None
-    ) -> StopResult:
-        for task in (session.alone_task, session.monitor_task):
+    async def _release(self, session: ActiveSession, caller: asyncio.Task | None) -> None:
+        """Stop the session's background tasks and give up the voice connection."""
+        for task in (session.alone_task, session.monitor_task, session.reminder_task):
             if task is not None and task is not caller:
                 task.cancel()
 
@@ -586,6 +808,13 @@ class SessionManager:
         # next track on a disconnected client.
         await self._music_release(session.guild_id, "recording_stopped")
         await self._teardown_voice(session)
+
+    async def _finalize(self, session: ActiveSession, reason: str) -> StopResult:
+        """Encode a session's audio, mark it complete and hand it over."""
+        # A speaker's first packet schedules their registration onto the event
+        # loop; if the session was closed before it ran, it never will.
+        for user_id, offset in session.sink.offsets.items():
+            await self._ensure_speaker(session, user_id, offset)
 
         # ffmpeg over hours of audio per speaker takes minutes. On the event
         # loop that froze the whole bot - Discord heartbeat and API included -
@@ -645,7 +874,7 @@ class SessionManager:
                 return None
             session.stopping = True
             self.active.pop(key, None)
-            for task in (session.alone_task, session.monitor_task):
+            for task in (session.alone_task, session.monitor_task, session.reminder_task):
                 if task is not None and task is not asyncio.current_task():
                     task.cancel()
             # The connection is about to go away. Telling music first means it

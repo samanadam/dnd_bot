@@ -50,10 +50,29 @@ class FakeMember:
         self.bot = bot
 
 
+class FakeReader:
+    """What py-cord's AudioReader offers a recorder that wants to change sinks."""
+
+    def __init__(self, client: FakeVoiceClient) -> None:
+        self.client = client
+        self.swaps = 0
+        self.fail = False
+
+    def set_sink(self, sink):
+        if self.fail:
+            raise RuntimeError("reader refused the sink")
+        old, self.client.sink = self.client.sink, sink
+        self.swaps += 1
+        return old
+
+
 class FakeVoiceClient:
     def __init__(self) -> None:
         self.recording = False
         self.sink = None
+        self._reader = None
+        self.has_set_sink = True
+        self.stops = 0
         self.disconnected = False
         self._connected = True
         self.connect_succeeds = True
@@ -61,9 +80,12 @@ class FakeVoiceClient:
     def start_recording(self, sink, callback, *args) -> None:
         self.recording = True
         self.sink = sink
+        self._reader = FakeReader(self) if self.has_set_sink else None
 
     def stop_recording(self) -> None:
+        self.stops += 1
         self.recording = False
+        self._reader = None
 
     def is_connected(self) -> bool:
         return self._connected
@@ -160,6 +182,29 @@ async def test_start_creates_the_session_row_and_begins_recording(manager):
     assert row["name"] == "Kamp Gecesi"
     assert row["channel_name"] == "Table"
     assert session.labels == {"10": "Thorin", "11": "aylin"}
+    await mgr.stop(1, 2)
+
+
+async def test_offsets_count_from_session_start_not_from_the_connect(manager):
+    """A slow voice connect must not shift every speaker's offset earlier.
+
+    The session's start time is taken before joining; a reconnected sink
+    continues from that clock, so the first sink has to begin there too.
+    """
+    import asyncio
+
+    mgr, _db, _config = manager
+
+    class SlowChannel(FakeChannel):
+        async def connect(self, timeout=None, reconnect=True):
+            await asyncio.sleep(0.3)
+            return self.voice_client
+
+    channel = SlowChannel([THORIN])
+    session = await mgr.start(channel=channel, text_channel_id=3, invoker=THORIN, name="Slow")
+    channel.voice_client.speak(THORIN, 0.1)
+
+    assert session.sink.offsets["10"] >= 0.3
     await mgr.stop(1, 2)
 
 

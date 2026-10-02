@@ -65,6 +65,9 @@ class Config:
     # How long a session is assumed to run, for the free-space check at
     # /session start. Raw capture is ~0.7 GB per speaker-hour.
     expected_session_hours: float = 4.0
+    # Remind the table to take a break (and split the session) this many hours in.
+    # 0 turns the reminder off.
+    break_reminder_hours: float = 3.0
     admin_user_id: int | None = None
     # Role allowed to run the commands that reach past the current session
     # (/session export, transcript, recover). Manage Guild works regardless.
@@ -325,6 +328,12 @@ def load_config() -> Config:
             "a wildcard would let any page a browser visits drive this bot."
         )
 
+    break_reminder_hours = _get_float("BREAK_REMINDER_HOURS", 3.0)
+    if break_reminder_hours < 0:
+        raise ConfigError(
+            f"BREAK_REMINDER_HOURS must be 0 (off) or more, got {break_reminder_hours}"
+        )
+
     music_enabled = _get_bool("MUSIC_ENABLED", False)
     music_youtube_enabled = _get_bool("MUSIC_YTDLP_ENABLED", False)
     music_soundcloud_enabled = _get_bool("MUSIC_SOUNDCLOUD_ENABLED", True)
@@ -350,6 +359,7 @@ def load_config() -> Config:
         trash_retention_days=_get_int("TRASH_RETENTION_DAYS", 7),
         disk_warning_threshold_mb=_get_int("DISK_WARNING_THRESHOLD_MB", 2000),
         expected_session_hours=_get_float("EXPECTED_SESSION_HOURS", 4.0),
+        break_reminder_hours=break_reminder_hours,
         admin_user_id=admin_user_id,
         session_admin_role_id=session_admin_role_id,
         export_max_discord_upload_mb=_get_int("EXPORT_MAX_DISCORD_UPLOAD_MB", 25),
