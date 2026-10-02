@@ -232,3 +232,203 @@ def test_the_sink_still_records_humans_while_ignoring_a_bot(tmp_path: Path):
     sink.cleanup()
     assert sink.bytes_written("10") == 3840
     assert (tmp_path / "10.pcm").exists()
+
+
+# -- silence between bursts ----------------------------------------------------
+
+from dnd_bot.gaps import read_gaps  # noqa: E402
+
+PACKET20 = b"\x01\x00" * 1920  # a real 20 ms packet: 48 kHz stereo 16-bit
+
+
+def gaps_of(sink: DiskSink, user_id: str):
+    return read_gaps(sink.path_for(user_id).with_suffix(".gaps"))
+
+
+def test_pause_between_bursts_is_recorded_as_a_gap(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    sink.write(PACKET20, 1001)  # speaker appears at +0.0
+    clock[0] = 0.02
+    sink.write(PACKET20, 1001)  # contiguous: no gap
+    clock[0] = 10.0
+    sink.write(PACKET20, 1001)  # 10 s later
+    sink.cleanup()
+
+    assert sink.path_for("1001").stat().st_size == 3 * len(PACKET20)  # pcm stays speech-only
+    [(position, silence)] = gaps_of(sink, "1001")
+    assert position == 2 * len(PACKET20)
+    assert silence == round((10.0 - 2 * 0.02) * 48_000) * 4
+
+
+def test_continuous_speech_with_jitter_records_no_gap(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    for i in range(200):  # 4 s of 20 ms packets, each arriving up to 30 ms late
+        clock[0] = i * 0.02 + (0.03 if i % 2 else 0.0)
+        sink.write(PACKET20, 1001)
+    sink.cleanup()
+    assert gaps_of(sink, "1001") == []
+
+
+def test_a_network_stall_is_not_mistaken_for_a_pause(tmp_path: Path):
+    """The backlog of a stall arrives at once; it was spoken in real time."""
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    for _ in range(50):  # 1 s of ordinary speech
+        sink.write(PACKET20, 1001)
+        clock[0] += 0.02
+    clock[0] += 2.0  # the network stalls for 2 s...
+    for _ in range(100):  # ...then 2 s of audio arrives in one burst
+        sink.write(PACKET20, 1001)
+    for _ in range(50):  # and speech carries on in real time
+        sink.write(PACKET20, 1001)
+        clock[0] += 0.02
+    sink.cleanup()
+
+    assert gaps_of(sink, "1001") == []
+
+
+def test_a_real_pause_is_committed_once_speech_resumes_in_real_time(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    for _ in range(50):
+        sink.write(PACKET20, 1001)
+        clock[0] += 0.02
+    clock[0] += 5.0  # nobody speaks for 5 s
+    for _ in range(50):
+        sink.write(PACKET20, 1001)
+        clock[0] += 0.02
+    sink.cleanup()
+
+    [(position, silence)] = gaps_of(sink, "1001")
+    assert position == 50 * len(PACKET20)
+    assert silence / BYTES_PER_SECOND == pytest.approx(5.0, abs=0.001)
+
+
+def test_a_pause_still_being_weighed_when_recording_ends_is_kept(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    sink.write(PACKET20, 1001)
+    clock[0] = 8.0
+    sink.write(PACKET20, 1001)  # a single packet after a pause, then the session ends
+    sink.cleanup()
+
+    [(_, silence)] = gaps_of(sink, "1001")
+    assert silence / BYTES_PER_SECOND == pytest.approx(8.0 - 0.02, abs=0.001)
+
+
+def test_speaker_who_leaves_and_rejoins_keeps_real_timing(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    sink.write(PACKET20, 1001)
+    clock[0] = 60.0  # away a minute, same user id, same file
+    sink.write(PACKET20, 1001)
+    sink.cleanup()
+    [(_, silence)] = gaps_of(sink, "1001")
+    assert silence / BYTES_PER_SECOND == pytest.approx(60.0 - 0.02, abs=0.001)
+
+
+def test_resumed_sink_pads_the_outage(tmp_path: Path):
+    clock = [0.0]
+    first = make_sink(tmp_path, clock)
+    first.write(PACKET20, 1001)
+    first.cleanup()
+
+    clock[0] = 100.0  # the sink was gone from 0.02 s to 100 s of session time
+    resumed = DiskSink(
+        tmp_path / "raw",
+        clock=lambda: clock[0],
+        base_offset=100.0,
+        known_offsets=first.offsets,
+    )
+    resumed.write(PACKET20, 1001)
+    resumed.cleanup()
+
+    [(position, silence)] = gaps_of(resumed, "1001")
+    assert position == len(PACKET20)
+    assert silence / BYTES_PER_SECOND == pytest.approx(100.0 - 0.02, abs=0.001)
+
+
+def test_two_resumes_do_not_double_count_earlier_gaps(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    sink.write(PACKET20, 1001)
+    clock[0] = 10.0
+    sink.write(PACKET20, 1001)  # gap of ~9.98 s recorded here
+    sink.cleanup()
+
+    clock[0] = 20.0
+    resumed = DiskSink(
+        tmp_path / "raw", clock=lambda: clock[0], base_offset=20.0, known_offsets=sink.offsets
+    )
+    resumed.write(PACKET20, 1001)
+    resumed.cleanup()
+
+    total = sum(silence for _, silence in gaps_of(resumed, "1001"))
+    # Three packets of speech plus all the silence must reach the session time of the last packet.
+    assert (3 * len(PACKET20) + total) / BYTES_PER_SECOND == pytest.approx(20.0 + 0.02, abs=0.01)
+
+
+def test_packet_with_rtp_metadata_is_handled_like_any_other(tmp_path: Path):
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    voice = SimpleNamespace(
+        pcm=PACKET20,
+        source=SimpleNamespace(id=1001, bot=False),
+        packet=SimpleNamespace(ssrc=7, timestamp=960, sequence=1),
+    )
+    sink.write(voice, None)
+    assert sink.bytes_written("1001") == len(PACKET20)
+    sink.cleanup()
+
+
+def test_finished_track_length_matches_session_time(tmp_path: Path):
+    """Sink to finalize: 30 s of session with a 10 s pause yields a 30 s file."""
+    import wave
+
+    from dnd_bot import paths
+    from dnd_bot.finalize import finalize_session_audio
+
+    raw = paths.raw_dir(tmp_path, "s1")
+    clock = [0.0]
+    sink = DiskSink(raw, clock=lambda: clock[0])
+
+    def speak(seconds: float) -> None:
+        for _ in range(round(seconds / 0.02)):
+            sink.write(PACKET20, 1001)
+            clock[0] += 0.02
+
+    speak(10.0)  # 0-10 s
+    clock[0] = 20.0  # 10 s of silence: nothing arrives
+    speak(10.0)  # 20-30 s
+    sink.cleanup()
+
+    written, warnings = finalize_session_audio(tmp_path, "s1", "wav")
+
+    assert warnings == []
+    with wave.open(str(written[0]), "rb") as reader:
+        seconds = reader.getnframes() / reader.getframerate()
+    assert seconds == pytest.approx(30.0, abs=0.05)
+
+
+def test_the_receive_path_own_voice_data_is_accepted(tmp_path: Path):
+    """The pinned py-cord hands `write` its own VoiceData, not bytes."""
+    voice_module = pytest.importorskip("discord.voice")
+    voice_data = getattr(voice_module, "VoiceData", None)
+    if voice_data is None:
+        pytest.skip("this py-cord predates VoiceData")
+
+    clock = [0.0]
+    sink = make_sink(tmp_path, clock)
+    speaker = SimpleNamespace(id=1001, bot=False)
+    packet = SimpleNamespace(ssrc=7, timestamp=960, sequence=1, decrypted_data=b"")
+    sink.write(voice_data(packet, speaker, pcm=PACKET20), speaker)
+    clock[0] = 4.0
+    for _ in range(4):
+        sink.write(voice_data(packet, speaker, pcm=PACKET20), speaker)
+        clock[0] += 0.02
+    sink.cleanup()
+
+    assert sink.bytes_written("1001") == 5 * len(PACKET20)
+    assert len(gaps_of(sink, "1001")) == 1

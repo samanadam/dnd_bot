@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import paths
 from .audio import AudioError, finalize_capture, pcm_duration_seconds
+from .gaps import gaps_path, total_gap_bytes
 
 log = logging.getLogger(__name__)
 
@@ -85,13 +86,14 @@ def finalize_session_audio(
         written.append(out_path)
         if not keep_raw:
             pcm_path.unlink(missing_ok=True)
+            gaps_path(pcm_path).unlink(missing_ok=True)
     return written, warnings
 
 
 def captured_seconds(sessions_root: Path, session_id: str) -> float:
-    """Longest single-speaker capture length, from raw PCM byte counts."""
+    """Longest single-speaker timeline, speech plus the pauses recorded in it."""
     durations = [
-        pcm_duration_seconds(path.stat().st_size)
+        pcm_duration_seconds(path.stat().st_size + total_gap_bytes(gaps_path(path)))
         for path in raw_captures(sessions_root, session_id)
     ]
     return max(durations, default=0.0)

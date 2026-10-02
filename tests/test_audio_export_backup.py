@@ -142,3 +142,140 @@ async def test_backup_produces_a_readable_copy(tmp_path: Path):
         assert await copy.character_map() == {"10": "Thorin"}
     finally:
         await copy.close()
+
+
+def _frames(n: int, value: int = 1) -> bytes:
+    return bytes([value, 0, value, 0]) * n  # n non-zero stereo frames
+
+
+def test_pcm_to_wav_inserts_silence_at_gap_positions(tmp_path: Path):
+    pcm = tmp_path / "10.pcm"
+    pcm.write_bytes(_frames(100, 1) + _frames(100, 2))
+    wav = tmp_path / "10.wav"
+    pcm_to_wav(pcm, wav, gaps=[(400, 4 * 50)])  # 50 silent frames after the first 100
+
+    with wave.open(str(wav), "rb") as reader:
+        assert reader.getnframes() == 250
+        data = reader.readframes(250)
+    assert data[:400] == _frames(100, 1)
+    assert data[400:600] == bytes(200)
+    assert data[600:] == _frames(100, 2)
+
+
+def test_gap_at_a_read_chunk_boundary_lands_exactly(tmp_path: Path):
+    one_mib = 1 << 20
+    pcm = tmp_path / "10.pcm"
+    pcm.write_bytes(_frames(one_mib // 4 + 10))  # a bit more than one chunk
+    wav = tmp_path / "10.wav"
+    pcm_to_wav(pcm, wav, gaps=[(one_mib, 400)])
+
+    with wave.open(str(wav), "rb") as reader:
+        assert reader.getnframes() == one_mib // 4 + 10 + 100
+        reader.setpos(one_mib // 4 - 1)
+        assert reader.readframes(1) == _frames(1)
+        assert reader.readframes(100) == bytes(400)
+        assert reader.readframes(1) == _frames(1)
+
+
+def test_gap_past_the_end_of_the_capture_goes_at_the_end(tmp_path: Path):
+    pcm = tmp_path / "10.pcm"
+    pcm.write_bytes(_frames(10))
+    wav = tmp_path / "10.wav"
+    pcm_to_wav(pcm, wav, gaps=[(99_999_996, 40)])  # a crash lost the pcm tail
+
+    with wave.open(str(wav), "rb") as reader:
+        assert reader.getnframes() == 20
+
+
+def test_finalize_applies_and_removes_the_gap_sidecar(tmp_path: Path):
+    from dnd_bot.gaps import append_gap, gaps_path
+
+    raw = paths.raw_dir(tmp_path, "s1")
+    raw.mkdir(parents=True)
+    (raw / "10.pcm").write_bytes(_frames(100))
+    with gaps_path(raw / "10.pcm").open("ab") as handle:
+        append_gap(handle, 200, BYTES_PER_SECOND)  # one second of silence mid-capture
+
+    written, warnings = finalize_session_audio(tmp_path, "s1", "wav")
+
+    assert warnings == []
+    with wave.open(str(written[0]), "rb") as reader:
+        assert reader.getnframes() == 100 + 48_000
+    assert not (raw / "10.pcm").exists()
+    assert not (raw / "10.gaps").exists()
+
+
+def test_captured_seconds_counts_the_silence(tmp_path: Path):
+    from dnd_bot.gaps import append_gap, gaps_path
+
+    raw = paths.raw_dir(tmp_path, "s1")
+    raw.mkdir(parents=True)
+    (raw / "10.pcm").write_bytes(bytes(BYTES_PER_SECOND))
+    with gaps_path(raw / "10.pcm").open("ab") as handle:
+        append_gap(handle, 0, 2 * BYTES_PER_SECOND)
+
+    assert captured_seconds(tmp_path, "s1") == 3.0
+
+
+needs_ffmpeg = pytest.mark.skipif(
+    __import__("shutil").which("ffmpeg") is None, reason="ffmpeg is required to encode Opus"
+)
+
+
+def _ffprobe_seconds(path: Path) -> float:
+    import subprocess
+
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return float(out.stdout.strip())
+
+
+def test_padded_stream_matches_what_the_wav_holds(tmp_path: Path):
+    from dnd_bot.audio import iter_padded_pcm
+
+    pcm = tmp_path / "10.pcm"
+    pcm.write_bytes(_frames(100, 1) + _frames(100, 2))
+    streamed = b"".join(iter_padded_pcm(pcm, [(400, 200)]))
+    assert streamed == _frames(100, 1) + bytes(200) + _frames(100, 2)
+
+
+@needs_ffmpeg
+def test_opus_track_is_as_long_as_the_session_and_leaves_no_temp_file(tmp_path: Path):
+    from dnd_bot.audio import finalize_capture
+    from dnd_bot.gaps import append_gap, gaps_path
+
+    pcm = tmp_path / "10.pcm"
+    pcm.write_bytes(_frames(48_000))  # 1 s of speech
+    with gaps_path(pcm).open("ab") as handle:
+        append_gap(handle, 0, 9 * BYTES_PER_SECOND)  # 9 s of silence before it
+
+    out = finalize_capture(pcm, tmp_path / "10.opus", "opus")
+
+    assert _ffprobe_seconds(out) == pytest.approx(10.0, abs=0.1)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["10.gaps", "10.opus", "10.pcm"]
+
+
+@needs_ffmpeg
+def test_a_failing_encode_raises_and_leaves_no_half_file(tmp_path: Path, monkeypatch):
+    from dnd_bot import audio
+
+    pcm = tmp_path / "10.pcm"
+    pcm.write_bytes(_frames(48_000))
+    monkeypatch.setitem(audio.ENCODER_ARGS, "opus", ["-c:a", "no_such_codec"])
+
+    with pytest.raises(AudioError, match="ffmpeg failed encoding 10.pcm"):
+        audio.finalize_capture(pcm, tmp_path / "10.opus", "opus")
+    assert not (tmp_path / "10.opus").exists()
+
+
+def test_an_empty_capture_is_still_refused_for_opus(tmp_path: Path):
+    from dnd_bot.audio import finalize_capture
+
+    pcm = tmp_path / "10.pcm"
+    pcm.write_bytes(b"")
+    with pytest.raises(AudioError, match="empty"):
+        finalize_capture(pcm, tmp_path / "10.opus", "opus")

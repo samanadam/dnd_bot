@@ -3,7 +3,7 @@
 Recording writes raw PCM - 192 KB per second per speaker - and only converts it
 to Opus at `/session stop`. So the disk high-water mark is not the size of the
 finished session but the size of the *whole raw capture*, held until the game
-ends, plus one intermediate WAV while each speaker is encoded.
+ends, plus one more capture's worth of headroom while each speaker is encoded.
 
 A session that runs out of disk mid-game does not fail loudly:
 `DiskSink.write` logs the error and carries on, so the recording silently stops
@@ -58,9 +58,11 @@ def required_bytes(speakers: int, hours: float) -> int:
     """Peak bytes on disk for a session of this shape.
 
     One raw capture per speaker for the whole session, plus one more capture's
-    worth for the intermediate WAV that `finalize_capture` writes while encoding
-    the first speaker - at which point every other speaker's PCM is still on
-    disk, because it is deleted only once that speaker's own encode succeeds.
+    worth of headroom for the encoded output while the first speaker is
+    finished - at which point every other speaker's PCM is still on disk,
+    because it is deleted only once that speaker's own encode succeeds. This is
+    a worst case: it assumes everyone talks the whole time, and the raw capture
+    holds only speech.
     """
     speakers = max(1, int(speakers))
     per_speaker = max(0.0, float(hours)) * 3600 * BYTES_PER_SECOND
