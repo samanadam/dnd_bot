@@ -440,13 +440,17 @@ class Database:
 
     # -- initiative --------------------------------------------------------
 
-    async def add_initiative(self, user_id: int, label: str, value: int) -> None:
+    async def add_initiative(
+        self, user_id: int, label: str, value: int, source: str = "typed"
+    ) -> None:
         """Record a player's total, replacing their earlier one under that name."""
+        if source not in ("typed", "rolled"):
+            raise ValueError(f"unknown initiative source {source!r}")
         await self.conn.execute(
-            "INSERT INTO initiative_reports (user_id, label, value, created_at) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT(user_id, label) DO UPDATE SET "
-            "value = excluded.value, created_at = excluded.created_at",
-            (str(user_id), label, value, to_iso(utcnow())),
+            "INSERT INTO initiative_reports (user_id, label, value, created_at, source) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, label) DO UPDATE SET "
+            "value = excluded.value, created_at = excluded.created_at, source = excluded.source",
+            (str(user_id), label, value, to_iso(utcnow()), source),
         )
         # Bounded: keep only the newest few, so a misbehaving client cannot grow it.
         await self.conn.execute(
@@ -462,7 +466,8 @@ class Database:
         await self.conn.execute("DELETE FROM initiative_reports WHERE created_at < ?", (cutoff,))
         await self.conn.commit()
         cursor = await self.conn.execute(
-            "SELECT id, label, value, created_at FROM initiative_reports ORDER BY created_at, id"
+            "SELECT id, user_id, label, value, source, created_at FROM initiative_reports "
+            "ORDER BY created_at, id"
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -476,6 +481,34 @@ class Database:
             )
         await self.conn.commit()
         return cursor.rowcount
+
+    async def set_initiative_roster(
+        self, campaign_id: str | None, entries: list[dict[str, Any]]
+    ) -> None:
+        """Replace the whole roster: the battle the portal is showing to players."""
+        at = to_iso(utcnow())
+        await self.conn.execute("DELETE FROM initiative_roster")
+        await self.conn.executemany(
+            "INSERT INTO initiative_roster (user_id, label, bonus, campaign_id, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(e["user_id"], e["label"], e["bonus"], campaign_id, at) for e in entries],
+        )
+        await self.conn.commit()
+
+    async def clear_initiative_roster(self) -> None:
+        await self.conn.execute("DELETE FROM initiative_roster")
+        await self.conn.commit()
+
+    async def roster_entry(self, user_id: int) -> dict[str, Any] | None:
+        """A player's place in the current roster, if a shown battle is waiting on them."""
+        cutoff = to_iso(utcnow() - timedelta(hours=INITIATIVE_MAX_AGE_HOURS))
+        cursor = await self.conn.execute(
+            "SELECT user_id, label, bonus, campaign_id FROM initiative_roster "
+            "WHERE user_id = ? AND updated_at >= ?",
+            (str(user_id), cutoff),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     # -- transcription queue ----------------------------------------------
 

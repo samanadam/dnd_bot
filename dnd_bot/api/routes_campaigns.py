@@ -6,6 +6,8 @@ cases to get wrong.
 
 No response here carries a Discord user id. Characters are reported as a
 character name and the member's display name, nothing that could address them.
+The portal does send ids in: an active character sheet names its player's
+character in that campaign (see the character routes at the end).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from aiohttp import web
 
 from .. import campaigns as rules
 from ..db import CampaignConflict
+from ..initiative import clean_name
 from . import schemas
 from .keys import BOT, CONFIG
 from .middleware import ApiError, read_json, require_snowflake
@@ -186,3 +189,40 @@ async def assign(request: web.Request) -> web.Response:
     except LookupError as exc:
         raise ApiError(404, "not_found", "No such campaign.") from exc
     return web.json_response(schemas.session_summary(updated))
+
+
+CHARACTER_SNOWFLAKE = re.compile(r"^\d{17,20}$")
+
+
+def _character_user(payload: dict) -> int:
+    user_id = payload.get("user_id")
+    if not isinstance(user_id, str) or not CHARACTER_SNOWFLAKE.match(user_id):
+        raise _bad("user_id must be a Discord id string.")
+    return int(user_id)
+
+
+@routes.post("/api/v1/campaigns/{campaign_id}/characters")
+async def set_character(request: web.Request) -> web.Response:
+    """The portal's active sheet for a player names their character in this campaign."""
+    row = await _existing(request)
+    payload = await read_json(request)
+    if set(payload) - {"user_id", "character_name"}:
+        raise _bad("Unknown field in body.")
+    user_id = _character_user(payload)
+    raw = payload.get("character_name")
+    # Line breaks become spaces before control characters are dropped.
+    name = clean_name(" ".join(raw[:200].split())) if isinstance(raw, str) else ""
+    if not name:
+        raise _bad("character_name must be 1-40 characters.")
+    await _db(request).set_campaign_character(row["id"], user_id, name)
+    return web.json_response({"ok": True, "character_name": name})
+
+
+@routes.post("/api/v1/campaigns/{campaign_id}/characters/clear")
+async def clear_character(request: web.Request) -> web.Response:
+    row = await _existing(request)
+    payload = await read_json(request)
+    if set(payload) - {"user_id"}:
+        raise _bad("Unknown field in body.")
+    await _db(request).clear_campaign_character(row["id"], _character_user(payload))
+    return web.json_response({"ok": True})
