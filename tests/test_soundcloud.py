@@ -532,7 +532,8 @@ async def test_set_entries_that_are_not_plain_tracks_are_dropped(sc_config):
         set_listing(
             [
                 {"url": PAGE},
-                {"url": "https://api-v2.soundcloud.com/tracks/123"},
+                {"url": "https://api-v2.soundcloud.com/tracks/123?secret_token=x"},
+                {"url": "https://api-v2.soundcloud.com/users/123"},
                 {"url": "https://soundcloud.com/a/b/s-SECRET"},
                 {"url": "https://evil.example/a/b"},
                 None,
@@ -541,7 +542,7 @@ async def test_set_entries_that_are_not_plain_tracks_are_dropped(sc_config):
     )
     listing = await SoundCloudResolver(sc_config, runner=fake).set_entries(SET)
     assert [t.id for t in listing.tracks] == [PAGE]
-    assert listing.skipped == 4
+    assert listing.skipped == 5
 
 
 async def test_a_long_set_is_cut_at_the_limit(sc_config):
@@ -556,7 +557,7 @@ async def test_a_long_set_is_cut_at_the_limit(sc_config):
 
 
 async def test_a_set_with_nothing_playable_is_refused(sc_config):
-    fake = FakeSetYtDlp(set_listing([{"url": "https://api-v2.soundcloud.com/tracks/1"}]))
+    fake = FakeSetYtDlp(set_listing([{"url": "https://api.soundcloud.com/tracks/1"}]))
     with pytest.raises(TrackResolutionError, match="no playable"):
         await SoundCloudResolver(sc_config, runner=fake).set_entries(SET)
 
@@ -586,3 +587,54 @@ async def test_sets_follow_the_soundcloud_switch(sc_config):
 
 def test_set_titles_are_sanitized(sc_config):
     assert _title_from_slug("a/rainy_night--2") == "Rainy night 2"
+
+
+async def test_numbered_set_entries_are_kept_and_named_by_their_place(sc_config):
+    """SoundCloud lists only the first few tracks of a set in full."""
+    fake = FakeSetYtDlp(
+        set_listing(
+            [{"url": PAGE}, {"url": "https://api-v2.soundcloud.com/tracks/1378976746"}],
+            title="Out of spite",
+        )
+    )
+    listing = await SoundCloudResolver(sc_config, runner=fake).set_entries(SET)
+    assert [t.id for t in listing.tracks] == [
+        PAGE,
+        "https://api-v2.soundcloud.com/tracks/1378976746",
+    ]
+    assert listing.tracks[1].title == "Out of spite · track 2"
+    assert listing.skipped == 0
+
+
+async def test_a_numbered_track_resolves_to_its_real_page(sc_config):
+    fake = FakeYtDlp()
+    resolver = SoundCloudResolver(sc_config, runner=fake)
+    track = await resolver.resolve("https://api-v2.soundcloud.com/tracks/268474219")
+    assert track.id == PAGE
+    assert track.title == "Tavern Ambience"
+    assert fake.metadata_calls[0][-1] == "https://api-v2.soundcloud.com/tracks/268474219"
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://api-v2.soundcloud.com/tracks/1?secret_token=x",
+        "https://api-v2.soundcloud.com/tracks/abc",
+        "https://api-v2.soundcloud.com/users/1",
+        "http://api-v2.soundcloud.com/tracks/1",
+        "https://api-v2.soundcloud.com.evil.example/tracks/1",
+    ],
+)
+async def test_only_the_exact_numbered_form_is_taken(sc_config, link):
+    fake = FakeYtDlp()
+    with pytest.raises(TrackResolutionError):
+        await SoundCloudResolver(sc_config, runner=fake).resolve(link)
+    assert fake.metadata_calls == []
+
+
+async def test_a_numbered_track_that_is_not_a_single_track_is_refused(sc_config):
+    fake = FakeYtDlp(info={**INFO, "webpage_url": "https://soundcloud.com/a/sets/b"})
+    with pytest.raises(TrackResolutionError):
+        await SoundCloudResolver(sc_config, runner=fake).resolve(
+            "https://api-v2.soundcloud.com/tracks/1"
+        )

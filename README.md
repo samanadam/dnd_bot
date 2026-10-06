@@ -603,7 +603,9 @@ bot"); SoundCloud does not. With `MUSIC_YTDLP_ENABLED=true` the bot also offers 
   queues them (in order or shuffled). Only a public set link,
   `https://soundcloud.com/<artist>/sets/<name>`, is accepted; it is rebuilt from
   the names like a track link. One flat listing reads at most 50 entries, and
-  every entry must itself be a plain public track link or it is dropped. The
+  every entry must itself be a plain public track link, or the exact numbered
+  form `https://api-v2.soundcloud.com/tracks/<id>` SoundCloud uses for tracks
+  past the first few, or it is dropped. The
   tracks carry no stream until their turn, when each is resolved like any other
   queued track. Every other call still refuses a set.
 - A queued track that cannot start (removed, made private) is passed over and the

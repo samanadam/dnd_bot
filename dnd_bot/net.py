@@ -212,3 +212,17 @@ def ffmpeg_protocol_args(local: bool) -> str:
 def looks_like_a_flag(uri: str) -> bool:
     """A URI starting with '-' would be read as an ffmpeg option, not a value."""
     return uri.startswith("-")
+
+
+# A track inside a public set that SoundCloud lists by number only. The flat
+# set listing gives full links for the first few tracks and this form for the
+# rest; it names one track on SoundCloud's own API host and nothing else.
+SOUNDCLOUD_API_TRACK = re.compile(r"^https://api-v2\.soundcloud\.com/tracks/([0-9]{1,20})$")
+
+
+def soundcloud_api_track_url(url: str) -> str | None:
+    """The canonical API link for a numbered SoundCloud track, else None."""
+    if not isinstance(url, str) or len(url) > MAX_URL_LENGTH:
+        return None
+    match = SOUNDCLOUD_API_TRACK.fullmatch(url)
+    return f"https://api-v2.soundcloud.com/tracks/{match.group(1)}" if match else None

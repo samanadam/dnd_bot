@@ -49,6 +49,7 @@ from .net import (
     canonical_watch_url,
     check_input_url,
     check_stream_url,
+    soundcloud_api_track_url,
     soundcloud_set_path,
     soundcloud_track_path,
 )
@@ -730,6 +731,7 @@ class SoundCloudResolver(YtDlpResolver):
         if info.get("_type") != "playlist":
             raise TrackResolutionError("That link is not a SoundCloud set.")
 
+        set_title = sanitize_title(info.get("title"))
         tracks: list[Track] = []
         skipped = 0
         seen = 0
@@ -740,18 +742,28 @@ class SoundCloudResolver(YtDlpResolver):
             seen += 1
             if seen > limit:
                 break
-            track_path = soundcloud_track_path(
-                str(entry.get("url") or entry.get("webpage_url") or "")
-            )
-            if track_path is None:
+            raw = str(entry.get("url") or entry.get("webpage_url") or "")
+            track_path = soundcloud_track_path(raw)
+            # SoundCloud fills in only the first few tracks of a set; the rest
+            # come back as numbered API links. Those are kept in that one exact
+            # form, named by their place in the set, and get their real link
+            # and title when they are resolved to play.
+            api_link = None if track_path else soundcloud_api_track_url(raw)
+            if track_path is None and api_link is None:
                 skipped += 1
                 continue
             duration = entry.get("duration")
             title = entry.get("title")
+            if title:
+                name = sanitize_title(title)
+            elif track_path:
+                name = _title_from_slug(track_path)
+            else:
+                name = sanitize_title(f"{set_title} · track {seen}")
             tracks.append(
                 Track(
-                    id=canonical_soundcloud_url(track_path),
-                    title=sanitize_title(title) if title else _title_from_slug(track_path),
+                    id=canonical_soundcloud_url(track_path) if track_path else api_link,
+                    title=name,
                     source=self.name,
                     uri="",
                     duration_seconds=(
@@ -770,8 +782,26 @@ class SoundCloudResolver(YtDlpResolver):
             raise TrackResolutionError("That set has no playable tracks.")
         log.info("Listed set %s: %d tracks, %d skipped", path, len(tracks), skipped)
         return SetListing(
-            title=sanitize_title(info.get("title")),
+            title=set_title,
             tracks=tracks,
             truncated=seen > limit,
             skipped=skipped,
         )
+
+    async def resolve(self, track_id: str) -> Track:
+        """A track link, or the numbered API link a set listing gave for one.
+
+        The API form is accepted only exactly as `soundcloud_api_track_url`
+        builds it; the resolved track is then known by its real page link.
+        """
+        api_link = soundcloud_api_track_url(track_id) if isinstance(track_id, str) else None
+        if api_link is None:
+            return await super().resolve(track_id)
+        self._check_enabled()
+        info = await self._extract(api_link)
+        if info.get("_type") == "playlist" or info.get("entries"):
+            raise TrackResolutionError("That link is a playlist. Use a single track.")
+        self._check_playable(info)
+        track = self._to_track(info, with_stream=True)
+        log.info("Resolved %s (%.0fs)", track.title, track.duration_seconds or 0)
+        return track
