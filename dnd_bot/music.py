@@ -46,6 +46,8 @@ FFMPEG_OPTIONS = "-vn -ar 48000 -ac 2"
 
 # No track is longer than a day; this only bounds a hostile or mistyped value.
 MAX_SEEK_SECONDS = 86_400.0
+# Tracks tried in a row before the queue gives up on starting the next one.
+MAX_START_ATTEMPTS = 5
 
 
 class MusicError(RuntimeError):
@@ -339,6 +341,60 @@ class MusicManager:
                 player.queue.append(track)
             return player
 
+    async def play_many(
+        self,
+        guild_id: int,
+        tracks: list[Track],
+        *,
+        channel_id: int | None = None,
+        position: str = "end",
+    ) -> tuple[GuildPlayer, int, int]:
+        """Queue several tracks at once, in the order given (a SoundCloud set).
+
+        `now` starts the first and puts the rest right behind it; `next` puts
+        them all at the front of the queue; `end` appends them. Whatever does
+        not fit in the queue is left out. Returns the player, how many tracks
+        went in, and how many did not (no room, or could not start).
+        """
+        if not tracks:
+            raise MusicError("Nothing to queue.")
+        async with self.lock_for(guild_id):
+            player = self.player(guild_id)
+            if position not in {"now", "next", "end"}:
+                raise MusicError("position must be now, next or end.")
+            held = len(player.queue) + (1 if player.current else 0)
+            room = self.config.music_max_queue - held
+            if room <= 0:
+                raise MusicError(f"The queue is full ({self.config.music_max_queue} tracks).")
+
+            await self._acquire_voice(guild_id, channel_id)
+
+            batch = deque(tracks[:room])
+            left_out = len(tracks) - len(batch)
+            if player.current is None or position == "now":
+                if player.current is not None:
+                    self._halt(player)
+                for attempt in range(1, MAX_START_ATTEMPTS + 1):
+                    first = batch.popleft()
+                    try:
+                        self._start(player, await self._fresh(first))
+                        break
+                    except MusicError:
+                        left_out += 1
+                        log.exception("Could not start a queued set track in guild %s", guild_id)
+                        if attempt == MAX_START_ATTEMPTS or not batch:
+                            raise
+                queued = 1 + len(batch)
+            else:
+                queued = len(batch)
+
+            if position == "end":
+                player.queue.extend(batch)
+            else:
+                # Right behind the current track, still in set order.
+                player.queue.extendleft(reversed(batch))
+            return player, queued, left_out
+
     def _halt(self, player: GuildPlayer) -> None:
         """Stop the current track without touching the connection or the queue.
 
@@ -397,12 +453,27 @@ class MusicManager:
             if player.mixer is not None:
                 player.mixer.end_handover()
             return
-        try:
-            # A queued stream may have expired while it waited its turn; this
-            # is the moment that matters, not the moment it was queued.
-            self._start(player, await self._fresh(nxt))
-        except MusicError:
-            log.exception("Could not start the next track in guild %s", guild_id)
+        # A track that cannot start (removed upstream, region-locked) is passed
+        # over rather than ending the music: a set queued an hour ago may hold
+        # one. A run of failures in a row still stops, so a dead source cannot
+        # spin through the whole queue.
+        for attempt in range(1, MAX_START_ATTEMPTS + 1):
+            try:
+                # A queued stream may have expired while it waited its turn; this
+                # is the moment that matters, not the moment it was queued.
+                fresh = await self._fresh(nxt)
+                if player.current is not None:
+                    # Something else started while this one was resolving (a
+                    # play now, a skip). That wins; this track keeps its place.
+                    player.queue.appendleft(nxt)
+                    return
+                self._start(player, fresh)
+                return
+            except MusicError:
+                log.exception("Could not start the next track in guild %s", guild_id)
+            if attempt == MAX_START_ATTEMPTS or not player.queue:
+                return
+            nxt = player.queue.popleft()
 
     async def skip(self, guild_id: int) -> GuildPlayer:
         player = self.player(guild_id)

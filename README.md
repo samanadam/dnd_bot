@@ -598,6 +598,16 @@ bot"); SoundCloud does not. With `MUSIC_YTDLP_ENABLED=true` the bot also offers 
   that has since been renamed no longer matches and is refused.
 - Only public tracks. Private ones, and tracks whose owner blocked streaming, fail
   with a normal resolver error.
+- **Albums and playlists (sets)** for music only, through their own two calls:
+  `POST /api/v1/music/set` lists a set's tracks, `POST /api/v1/music/play-set`
+  queues them (in order or shuffled). Only a public set link,
+  `https://soundcloud.com/<artist>/sets/<name>`, is accepted; it is rebuilt from
+  the names like a track link. One flat listing reads at most 50 entries, and
+  every entry must itself be a plain public track link or it is dropped. The
+  tracks carry no stream until their turn, when each is resolved like any other
+  queued track. Every other call still refuses a set.
+- A queued track that cannot start (removed, made private) is passed over and the
+  next one tried, up to five in a row, so one dead entry does not end the music.
 
 ### What the audio path refuses to do
 
@@ -678,6 +688,8 @@ list.
 | GET | `/api/v1/music/library?source=r2&q=` | Browse tracks. |
 | POST | `/api/v1/music/search` | `{source, query}` — reaches an external source. |
 | POST | `/api/v1/music/play` | `{source, id, channel_id?, position?}` |
+| POST | `/api/v1/music/set` | `{source: "soundcloud", id}` — a set's tracks: `{title, tracks, truncated, skipped}`. Reaches SoundCloud. |
+| POST | `/api/v1/music/play-set` | `{source: "soundcloud", id, position?, shuffle?, channel_id?}` — queues the set; the player state plus `{queued, skipped}`. |
 | POST | `/api/v1/music/{pause,resume,skip,stop}` | Transport. |
 | POST | `/api/v1/music/volume` | `{volume}` — 0 to 2. |
 | POST | `/api/v1/music/seek` | `{position_seconds}` — restarts the current track from that offset; a paused track stays paused. |

@@ -328,3 +328,128 @@ async def test_seek_past_the_end_reads_as_a_conflict(client, music):
         "/api/v1/music/seek", json={"position_seconds": 99999}, headers=AUTH
     )
     assert response.status == 409
+
+
+# -- SoundCloud sets -----------------------------------------------------------
+
+SET_LINK = "https://soundcloud.com/wolfbravery/sets/tavern-nights"
+
+
+class FakeSetSource(FakeSource):
+    def __init__(self):
+        super().__init__(name="soundcloud", tracks=[])
+        self.listed: list[str] = []
+
+    async def set_entries(self, link, limit=50):
+        from dnd_bot.ytdlp import SetListing
+
+        self.listed.append(link)
+        if self.error:
+            raise self.error
+        tracks = [
+            Track(f"https://soundcloud.com/wolfbravery/t{index}", f"T{index}", "soundcloud", "")
+            for index in range(4)
+        ]
+        return SetListing(title="Tavern Nights", tracks=tracks, skipped=1)
+
+
+class FakeSetMusic(FakeMusic):
+    async def play_many(self, guild_id, tracks, channel_id=None, position="end"):
+        self._record("play_many", guild_id, [t.id for t in tracks], channel_id, position)
+        return None, len(tracks) - 1, 1
+
+
+@pytest.fixture
+async def set_client(config: Config):
+    source = FakeSetSource()
+    music = FakeSetMusic({"r2": FakeSource(), "soundcloud": source})
+    build = make_client_factory(config)
+    async with await build(music) as test_client:
+        test_client.music = music
+        test_client.source = source
+        yield test_client
+
+
+async def test_a_set_lists_its_tracks(set_client):
+    response = await set_client.post(
+        "/api/v1/music/set", json={"source": "soundcloud", "id": SET_LINK}, headers=AUTH
+    )
+    assert response.status == 200
+    body = await response.json()
+    assert body["title"] == "Tavern Nights"
+    assert [t["title"] for t in body["tracks"]] == ["T0", "T1", "T2", "T3"]
+    assert body["skipped"] == 1 and body["truncated"] is False
+    # Nothing played.
+    assert set_client.music.calls == []
+
+
+async def test_a_set_is_queued_in_order(set_client):
+    response = await set_client.post(
+        "/api/v1/music/play-set",
+        json={"source": "soundcloud", "id": SET_LINK, "position": "now", "channel_id": "2"},
+        headers=AUTH,
+    )
+    assert response.status == 202
+    body = await response.json()
+    name, args, _ = set_client.music.calls[0]
+    assert name == "play_many"
+    assert args[1] == [f"https://soundcloud.com/wolfbravery/t{index}" for index in range(4)]
+    assert args[2:] == (2, "now")
+    # One left out by the player, one dropped from the listing.
+    assert (body["queued"], body["skipped"]) == (3, 2)
+    assert body["volume"] == 0.3
+
+
+async def test_a_shuffled_set_keeps_every_track(set_client, monkeypatch):
+    import random
+
+    monkeypatch.setattr(random, "shuffle", lambda items: items.reverse())
+    await set_client.post(
+        "/api/v1/music/play-set",
+        json={"source": "soundcloud", "id": SET_LINK, "shuffle": True},
+        headers=AUTH,
+    )
+    ids = set_client.music.calls[0][1][1]
+    assert ids == [f"https://soundcloud.com/wolfbravery/t{index}" for index in (3, 2, 1, 0)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"source": "youtube", "id": SET_LINK},
+        {"source": "soundcloud"},
+        {"source": "soundcloud", "id": SET_LINK, "shuffle": "yes"},
+        {"source": "soundcloud", "id": SET_LINK, "channel_id": 2},
+        {"source": "soundcloud", "id": SET_LINK, "position": "middle"},
+    ],
+)
+async def test_a_malformed_set_request_is_400(set_client, body):
+    response = await set_client.post("/api/v1/music/play-set", json=body, headers=AUTH)
+    assert response.status == 400
+    assert set_client.music.calls == []
+    assert set_client.source.listed == []
+
+
+async def test_a_set_that_cannot_be_read_is_502(set_client):
+    set_client.source.error = TrackResolutionError("That set has no playable tracks.")
+    response = await set_client.post(
+        "/api/v1/music/play-set", json={"source": "soundcloud", "id": SET_LINK}, headers=AUTH
+    )
+    assert response.status == 502
+
+
+async def test_a_set_needs_soundcloud_turned_on(config):
+    build = make_client_factory(config)
+    async with await build(FakeSetMusic({"r2": FakeSource()})) as client:
+        response = await client.post(
+            "/api/v1/music/set", json={"source": "soundcloud", "id": SET_LINK}, headers=AUTH
+        )
+        assert response.status == 503
+
+
+async def test_a_full_queue_refuses_a_set_as_a_conflict(set_client):
+    set_client.music.error = MusicError("The queue is full (100 tracks).")
+    response = await set_client.post(
+        "/api/v1/music/play-set", json={"source": "soundcloud", "id": SET_LINK}, headers=AUTH
+    )
+    assert response.status == 409

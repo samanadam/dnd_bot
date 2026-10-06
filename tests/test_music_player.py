@@ -661,3 +661,165 @@ async def test_seek_refuses_bad_positions_and_an_idle_player(manager):
     for bad in (-1.0, 120.0, 500.0, 90_000.0):
         with pytest.raises(MusicError):
             await manager.seek(1, bad)
+
+
+# -- several tracks at once (a SoundCloud set) -------------------------------
+
+
+class FakeResolver:
+    """Resolves a stale set entry into a playable track, or refuses named ones."""
+
+    def __init__(self, failing=()):
+        self.failing = set(failing)
+        self.resolved: list[str] = []
+
+    async def resolve(self, track_id):
+        self.resolved.append(track_id)
+        if track_id in self.failing:
+            raise RuntimeError("gone")
+        return Track(
+            id=track_id, title=track_id, source="soundcloud", uri=f"https://cdn.test/{track_id}"
+        )
+
+
+def entry(track_id: str) -> Track:
+    # What a set listing returns: no stream yet, stale from the start.
+    return Track(id=track_id, title=track_id, source="soundcloud", uri="", expires_at=0.0)
+
+
+@pytest.fixture
+def set_manager(music_config, voice, clock):
+    guild = FakeGuild({2: FakeChannel(2, voice)})
+    config = replace(music_config, music_max_queue=10)
+    resolver = FakeResolver()
+    manager = MusicManager(
+        FakeBot(config, guild),
+        config,
+        sources={"soundcloud": resolver},
+        source_factory=lambda uri, volume, before_options="": FakeSource(
+            uri, before_options, volume
+        ),
+        clock=clock,
+    )
+    manager.resolver = resolver
+    return manager
+
+
+async def test_a_set_starts_its_first_track_and_queues_the_rest_in_order(set_manager, voice):
+    _, queued, left_out = await set_manager.play_many(
+        1, [entry("a"), entry("b"), entry("c")], channel_id=2
+    )
+    player = set_manager.player(1)
+    assert (queued, left_out) == (3, 0)
+    assert player.current.id == "a"
+    assert voice.source.uri == "https://cdn.test/a"
+    # Only the first is resolved now; the rest wait for their turn.
+    assert set_manager.resolver.resolved == ["a"]
+    assert [t.id for t in player.queue] == ["b", "c"]
+
+
+async def test_a_set_played_now_goes_in_front_of_the_existing_queue(set_manager):
+    await set_manager.play(1, track("old"), channel_id=2)
+    await set_manager.play(1, track("waiting"), channel_id=2)
+    await set_manager.play_many(1, [entry("a"), entry("b")], channel_id=2, position="now")
+    player = set_manager.player(1)
+    assert player.current.id == "a"
+    assert [t.id for t in player.queue] == ["b", "waiting"]
+
+
+async def test_a_set_played_next_keeps_the_current_track(set_manager):
+    await set_manager.play(1, track("old"), channel_id=2)
+    await set_manager.play(1, track("waiting"), channel_id=2)
+    _, queued, _ = await set_manager.play_many(
+        1, [entry("a"), entry("b")], channel_id=2, position="next"
+    )
+    player = set_manager.player(1)
+    assert queued == 2
+    assert player.current.id == "old"
+    assert [t.id for t in player.queue] == ["a", "b", "waiting"]
+
+
+async def test_a_set_added_at_the_end_goes_behind_the_queue(set_manager):
+    await set_manager.play(1, track("old"), channel_id=2)
+    await set_manager.play(1, track("waiting"), channel_id=2)
+    await set_manager.play_many(1, [entry("a"), entry("b")], channel_id=2, position="end")
+    assert [t.id for t in set_manager.player(1).queue] == ["waiting", "a", "b"]
+
+
+async def test_a_set_only_fills_the_room_left_in_the_queue(set_manager):
+    for index in range(8):
+        await set_manager.play(1, track(f"t{index}"), channel_id=2)
+    _, queued, left_out = await set_manager.play_many(1, [entry(x) for x in "abcd"], channel_id=2)
+    assert (queued, left_out) == (2, 2)
+    assert [t.id for t in set_manager.player(1).queue][-2:] == ["a", "b"]
+
+
+async def test_a_full_queue_refuses_a_set(set_manager):
+    for index in range(10):
+        await set_manager.play(1, track(f"t{index}"), channel_id=2)
+    with pytest.raises(MusicError, match="queue"):
+        await set_manager.play_many(1, [entry("a")], channel_id=2)
+
+
+async def test_a_set_skips_a_first_track_that_will_not_start(set_manager):
+    set_manager.resolver.failing = {"a"}
+    _, queued, left_out = await set_manager.play_many(
+        1, [entry("a"), entry("b"), entry("c")], channel_id=2
+    )
+    assert (queued, left_out) == (2, 1)
+    assert set_manager.player(1).current.id == "b"
+
+
+async def test_a_set_where_nothing_starts_is_an_error(set_manager):
+    set_manager.resolver.failing = {"a", "b"}
+    with pytest.raises(MusicError):
+        await set_manager.play_many(1, [entry("a"), entry("b")], channel_id=2)
+
+
+async def test_an_empty_set_is_refused(set_manager):
+    with pytest.raises(MusicError):
+        await set_manager.play_many(1, [], channel_id=2)
+
+
+async def test_a_bad_position_is_refused_for_a_set(set_manager):
+    with pytest.raises(MusicError, match="position"):
+        await set_manager.play_many(1, [entry("a")], channel_id=2, position="middle")
+
+
+async def test_the_queue_passes_over_a_track_that_will_not_start(set_manager):
+    await set_manager.play_many(1, [entry("a"), entry("b"), entry("c")], channel_id=2)
+    set_manager.resolver.failing = {"b"}
+    await set_manager.on_track_end(1, None)
+    player = set_manager.player(1)
+    assert player.current.id == "c"
+    assert not player.queue
+
+
+async def test_a_run_of_failures_stops_the_queue_instead_of_spinning(set_manager):
+    ids = [f"x{index}" for index in range(8)]
+    await set_manager.play_many(1, [entry("a"), *[entry(x) for x in ids]], channel_id=2)
+    set_manager.resolver.failing = set(ids)
+    await set_manager.on_track_end(1, None)
+    player = set_manager.player(1)
+    assert player.current is None
+    # Five tried and dropped; the rest stay queued for a later skip.
+    assert len(player.queue) == 3
+
+
+async def test_a_track_started_while_the_next_one_resolves_wins(set_manager):
+    await set_manager.play_many(1, [entry("a"), entry("b"), entry("c")], channel_id=2)
+    resolver = set_manager.resolver
+    original = resolver.resolve
+
+    async def slow_resolve(track_id):
+        if track_id == "b":
+            # A "play now" lands while b is still being resolved.
+            await set_manager.play(1, track("urgent"), channel_id=2, position="now")
+        return await original(track_id)
+
+    resolver.resolve = slow_resolve
+    await set_manager.on_track_end(1, None)
+    player = set_manager.player(1)
+    assert player.current.id == "urgent"
+    # Nothing was dropped: b is back at the front, c behind it.
+    assert [t.id for t in player.queue] == ["b", "c"]

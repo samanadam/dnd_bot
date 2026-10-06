@@ -33,6 +33,7 @@ import re
 import shutil
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -43,10 +44,12 @@ from .net import (
     SOUNDCLOUD_HOSTS,
     YOUTUBE_ID,
     UnsafeUrl,
+    canonical_soundcloud_set_url,
     canonical_soundcloud_url,
     canonical_watch_url,
     check_input_url,
     check_stream_url,
+    soundcloud_set_path,
     soundcloud_track_path,
 )
 
@@ -102,6 +105,38 @@ class TrackResolutionError(RuntimeError):
 
 class SourceDisabled(RuntimeError):
     """The source exists but is switched off. Becomes a 503."""
+
+
+# How many tracks one set may put in the queue. A long album is ten to thirty;
+# the queue itself holds 100.
+SET_TRACK_LIMIT = 50
+
+
+@dataclass
+class SetListing:
+    """The playable tracks of a SoundCloud set, in set order."""
+
+    title: str
+    tracks: list[Track] = field(default_factory=list)
+    # More entries than SET_TRACK_LIMIT came back; the rest were left out.
+    truncated: bool = False
+    # Entries dropped because they were not a plain public track link.
+    skipped: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "title": self.title,
+            "tracks": [track.to_dict() for track in self.tracks],
+            "truncated": self.truncated,
+            "skipped": self.skipped,
+        }
+
+
+def _title_from_slug(path: str) -> str:
+    """A readable stand-in title for a set entry that came back without one."""
+    slug = path.rsplit("/", 1)[-1]
+    words = re.sub(r"[-_]+", " ", slug).strip()
+    return sanitize_title(words[:1].upper() + words[1:] if words else "")
 
 
 def sanitize_title(raw: Any) -> str:
@@ -670,3 +705,73 @@ class SoundCloudResolver(YtDlpResolver):
         if path is None:
             raise TrackResolutionError("That is not a single SoundCloud track.")
         return canonical_soundcloud_url(path)
+
+    # -- sets --------------------------------------------------------------
+
+    async def set_entries(self, link: str, limit: int = SET_TRACK_LIMIT) -> SetListing:
+        """The tracks of a public SoundCloud set (album or playlist).
+
+        One flat extraction lists the set without resolving each track. Every
+        entry must be a plain public track link, exactly what a single pasted
+        track must be; anything else is dropped and counted. The tracks carry
+        no stream and are already stale, so the player resolves each one when
+        its turn comes, the same way it refreshes an expired stream.
+        """
+        self._check_enabled()
+        path = soundcloud_set_path(link) if isinstance(link, str) else None
+        if path is None:
+            raise TrackResolutionError("That is not a public SoundCloud set link.")
+        target = canonical_soundcloud_set_url(path)
+        limit = max(1, min(limit, SET_TRACK_LIMIT))
+        # Later flags win: these turn the base --no-playlist off for this one call.
+        info = await self._extract(
+            target, extra=["--yes-playlist", "--flat-playlist", "--playlist-end", str(limit + 1)]
+        )
+        if info.get("_type") != "playlist":
+            raise TrackResolutionError("That link is not a SoundCloud set.")
+
+        tracks: list[Track] = []
+        skipped = 0
+        seen = 0
+        for entry in info.get("entries") or []:
+            if not isinstance(entry, dict):
+                skipped += 1
+                continue
+            seen += 1
+            if seen > limit:
+                break
+            track_path = soundcloud_track_path(
+                str(entry.get("url") or entry.get("webpage_url") or "")
+            )
+            if track_path is None:
+                skipped += 1
+                continue
+            duration = entry.get("duration")
+            title = entry.get("title")
+            tracks.append(
+                Track(
+                    id=canonical_soundcloud_url(track_path),
+                    title=sanitize_title(title) if title else _title_from_slug(track_path),
+                    source=self.name,
+                    uri="",
+                    duration_seconds=(
+                        float(duration)
+                        if not isinstance(duration, bool)
+                        and isinstance(duration, int | float)
+                        and math.isfinite(duration)
+                        and duration > 0
+                        else None
+                    ),
+                    # Stale from the start: resolved when it reaches the front.
+                    expires_at=0.0,
+                )
+            )
+        if not tracks:
+            raise TrackResolutionError("That set has no playable tracks.")
+        log.info("Listed set %s: %d tracks, %d skipped", path, len(tracks), skipped)
+        return SetListing(
+            title=sanitize_title(info.get("title")),
+            tracks=tracks,
+            truncated=seen > limit,
+            skipped=skipped,
+        )

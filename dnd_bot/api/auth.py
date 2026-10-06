@@ -27,6 +27,8 @@ PUBLIC_PATHS = frozenset({"/api/v1/health"})
 TIGHT_LIMIT_PREFIXES = (
     "/api/v1/recording/",
     "/api/v1/music/search",
+    "/api/v1/music/set",
+    "/api/v1/music/play-set",
     "/api/v1/music/upload",
     "/api/v1/transcripts/search",
     "/api/v1/transcription/sync",

@@ -128,6 +128,36 @@ def canonical_soundcloud_url(path: str) -> str:
     return f"https://soundcloud.com/{path}"
 
 
+# A public SoundCloud set (album or playlist) is `<artist>/sets/<name>`. A
+# private set carries a fourth part (`s-<token>`) and does not match. The name
+# is capped below the track slug so `artist/sets/name` fits what the portal
+# stores (241 characters).
+SOUNDCLOUD_SET_SLUG = r"[A-Za-z0-9_-]{1,115}"
+SOUNDCLOUD_SET_LINK = re.compile(
+    rf"^https://(?:www\.|m\.)?soundcloud\.com/({SOUNDCLOUD_SLUG})/sets/({SOUNDCLOUD_SET_SLUG})/?$"
+)
+
+
+def soundcloud_set_path(url: str) -> str | None:
+    """`artist/sets/name` (lower case) for a plain public SoundCloud set link, else None."""
+    if not isinstance(url, str) or len(url) > MAX_URL_LENGTH:
+        return None
+    match = SOUNDCLOUD_SET_LINK.fullmatch(url)
+    if match is None:
+        return None
+    artist, name = match.group(1).lower(), match.group(2).lower()
+    if artist in SOUNDCLOUD_NOT_A_TRACK:
+        return None
+    return f"{artist}/sets/{name}"
+
+
+def canonical_soundcloud_set_url(path: str) -> str:
+    """The one URL form the bot fetches for a SoundCloud set."""
+    if not isinstance(path, str) or soundcloud_set_path(f"https://soundcloud.com/{path}") != path:
+        raise UnsafeUrl("That is not a SoundCloud set.")
+    return f"https://soundcloud.com/{path}"
+
+
 def _addresses(host: str) -> list[ipaddress._BaseAddress]:
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)

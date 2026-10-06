@@ -7,6 +7,7 @@ id, so a yt-dlp outage cannot change how an R2 request behaves.
 from __future__ import annotations
 
 import logging
+import random
 
 from aiohttp import web
 
@@ -98,6 +99,57 @@ async def play(request: web.Request) -> web.Response:
     )
     log.info("Playing %s (%s) via the API", track.title, track.source)
     return _state(request, status=202)
+
+
+def _set_source(request: web.Request, payload: dict):
+    """Sets exist on SoundCloud only; any other source is refused by name."""
+    if payload.get("source", "soundcloud") != "soundcloud":
+        raise ApiError(400, "bad_request", "Sets are only supported for SoundCloud.")
+    link = payload.get("id")
+    if not isinstance(link, str) or not link:
+        raise ApiError(400, "bad_request", "id is required.")
+    return _source(request, "soundcloud"), link
+
+
+@routes.post("/api/v1/music/set")
+async def set_tracks(request: web.Request) -> web.Response:
+    """The tracks of a SoundCloud album or playlist, without playing anything."""
+    payload = await read_json(request)
+    source, link = _set_source(request, payload)
+    listing = await source.set_entries(link)
+    return web.json_response(listing.to_dict())
+
+
+@routes.post("/api/v1/music/play-set")
+async def play_set(request: web.Request) -> web.Response:
+    """Queue a SoundCloud album or playlist, in order or shuffled."""
+    payload = await read_json(request)
+    source, link = _set_source(request, payload)
+    position = payload.get("position", "end")
+    # Checked before the set is fetched, so a bad request never reaches SoundCloud.
+    if position not in {"now", "next", "end"}:
+        raise ApiError(400, "bad_request", "position must be now, next or end.")
+    shuffle = payload.get("shuffle", False)
+    if not isinstance(shuffle, bool):
+        raise ApiError(400, "bad_request", "shuffle must be true or false.")
+    channel_id = payload.get("channel_id")
+    if channel_id is not None and not (isinstance(channel_id, str) and channel_id.isdigit()):
+        raise ApiError(400, "bad_request", "channel_id must be a numeric id.")
+
+    listing = await source.set_entries(link)
+    tracks = list(listing.tracks)
+    if shuffle:
+        random.shuffle(tracks)
+    _, queued, left_out = await _music(request).play_many(
+        _guild_id(request),
+        tracks,
+        channel_id=int(channel_id) if channel_id else None,
+        position=position,
+    )
+    log.info("Queued %d tracks from the set %s via the API", queued, listing.title)
+    body = _music(request).state_summary(_guild_id(request))
+    body.update({"queued": queued, "skipped": listing.skipped + left_out})
+    return web.json_response(body, status=202)
 
 
 @routes.post("/api/v1/music/pause")

@@ -18,16 +18,20 @@ import pytest
 from dnd_bot.net import (
     SOUNDCLOUD_HOSTS,
     UnsafeUrl,
+    canonical_soundcloud_set_url,
     canonical_soundcloud_url,
     check_input_url,
+    soundcloud_set_path,
     soundcloud_track_path,
 )
 from dnd_bot.tracks import build_sources
 from dnd_bot.ytdlp import (
+    SET_TRACK_LIMIT,
     SoundCloudResolver,
     SourceDisabled,
     TrackResolutionError,
     YtDlpResolver,
+    _title_from_slug,
     classify,
 )
 
@@ -422,3 +426,163 @@ def test_messages_name_the_right_service():
 def test_a_word_containing_age_is_not_an_age_restriction():
     assert "age-restricted" not in classify("Unable to download webpage: timed out")
     assert "age-restricted" in classify("Sign in to confirm your age")
+
+
+# -- sets (albums and playlists) -------------------------------------------
+
+SET = "https://soundcloud.com/wolfbravery/sets/tavern-nights"
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        (SET, "wolfbravery/sets/tavern-nights"),
+        (
+            "https://www.soundcloud.com/WolfBravery/sets/Tavern-Nights/",
+            "wolfbravery/sets/tavern-nights",
+        ),
+        ("https://m.soundcloud.com/a_b/sets/c-d", "a_b/sets/c-d"),
+    ],
+)
+def test_a_public_set_link_reduces_to_its_path(url, expected):
+    assert soundcloud_set_path(url) == expected
+    assert canonical_soundcloud_set_url(expected) == f"https://soundcloud.com/{expected}"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        PAGE,
+        "http://soundcloud.com/a/sets/b",
+        "https://soundcloud.com/a/sets",
+        "https://soundcloud.com/a/sets/b/s-SECRETTOKEN",
+        "https://soundcloud.com/discover/sets/weekly",
+        "https://soundcloud.com/a/sets/" + "b" * 116,
+        "https://soundcloud.com.evil.example/a/sets/b",
+        "https://on.soundcloud.com/AbCdEf",
+        "https://soundcloud.com/a/sets/b?si=1",
+    ],
+)
+def test_anything_but_a_public_set_link_is_refused(url):
+    assert soundcloud_set_path(url) is None
+
+
+def test_a_track_link_is_never_a_set_and_a_set_never_a_track():
+    assert soundcloud_track_path(SET) is None
+    assert soundcloud_set_path(PAGE) is None
+    with pytest.raises(UnsafeUrl):
+        canonical_soundcloud_set_url("wolfbravery/tavern-ambience")
+
+
+class FakeSetYtDlp:
+    def __init__(self, listing):
+        self.listing = listing
+        self.calls: list[list[str]] = []
+
+    async def __call__(self, args, timeout):
+        self.calls.append(args)
+        return 0, json.dumps(self.listing).encode(), b""
+
+
+def set_listing(entries, title="Tavern Nights"):
+    return {"_type": "playlist", "title": title, "entries": entries}
+
+
+async def test_a_set_lists_its_tracks_without_resolving_them(sc_config):
+    fake = FakeSetYtDlp(
+        set_listing(
+            [
+                {
+                    "url": "https://soundcloud.com/wolfbravery/tavern-ambience",
+                    "title": "Tavern Ambience",
+                    "duration": 700,
+                },
+                {"url": "https://soundcloud.com/wolfbravery/rainy-night"},
+            ]
+        )
+    )
+    resolver = SoundCloudResolver(sc_config, runner=fake)
+    listing = await resolver.set_entries(SET)
+
+    assert listing.title == "Tavern Nights"
+    assert [t.id for t in listing.tracks] == [
+        "https://soundcloud.com/wolfbravery/tavern-ambience",
+        "https://soundcloud.com/wolfbravery/rainy-night",
+    ]
+    assert [t.title for t in listing.tracks] == ["Tavern Ambience", "Rainy night"]
+    assert listing.tracks[0].duration_seconds == 700.0
+    # No stream yet, and already stale: the player resolves each in turn.
+    assert all(t.uri == "" and t.is_stale(0.0) for t in listing.tracks)
+    args = fake.calls[0]
+    assert args[-1] == SET and args[-2] == "--"
+    assert "--flat-playlist" in args and "--yes-playlist" in args
+    assert args.index("--yes-playlist") > args.index("--no-playlist")
+
+
+async def test_a_set_link_is_rebuilt_not_trusted(sc_config):
+    fake = FakeSetYtDlp(set_listing([{"url": PAGE}]))
+    await SoundCloudResolver(sc_config, runner=fake).set_entries(
+        "https://www.soundcloud.com/WolfBravery/sets/Tavern-Nights/"
+    )
+    assert fake.calls[0][-1] == SET
+
+
+async def test_set_entries_that_are_not_plain_tracks_are_dropped(sc_config):
+    fake = FakeSetYtDlp(
+        set_listing(
+            [
+                {"url": PAGE},
+                {"url": "https://api-v2.soundcloud.com/tracks/123"},
+                {"url": "https://soundcloud.com/a/b/s-SECRET"},
+                {"url": "https://evil.example/a/b"},
+                None,
+            ]
+        )
+    )
+    listing = await SoundCloudResolver(sc_config, runner=fake).set_entries(SET)
+    assert [t.id for t in listing.tracks] == [PAGE]
+    assert listing.skipped == 4
+
+
+async def test_a_long_set_is_cut_at_the_limit(sc_config):
+    entries = [
+        {"url": f"https://soundcloud.com/a/t{index}"} for index in range(SET_TRACK_LIMIT + 1)
+    ]
+    fake = FakeSetYtDlp(set_listing(entries))
+    listing = await SoundCloudResolver(sc_config, runner=fake).set_entries(SET)
+    assert len(listing.tracks) == SET_TRACK_LIMIT
+    assert listing.truncated is True
+    assert fake.calls[0][fake.calls[0].index("--playlist-end") + 1] == str(SET_TRACK_LIMIT + 1)
+
+
+async def test_a_set_with_nothing_playable_is_refused(sc_config):
+    fake = FakeSetYtDlp(set_listing([{"url": "https://api-v2.soundcloud.com/tracks/1"}]))
+    with pytest.raises(TrackResolutionError, match="no playable"):
+        await SoundCloudResolver(sc_config, runner=fake).set_entries(SET)
+
+
+async def test_something_that_is_not_a_set_is_refused(sc_config):
+    fake = FakeSetYtDlp(INFO)
+    with pytest.raises(TrackResolutionError, match="not a SoundCloud set"):
+        await SoundCloudResolver(sc_config, runner=fake).set_entries(SET)
+
+
+@pytest.mark.parametrize(
+    "link", [PAGE, "https://soundcloud.com/a/sets/b/s-x", "https://evil.example/a/sets/b", 7]
+)
+async def test_a_bad_set_link_never_reaches_yt_dlp(sc_config, link):
+    fake = FakeSetYtDlp(set_listing([{"url": PAGE}]))
+    with pytest.raises(TrackResolutionError):
+        await SoundCloudResolver(sc_config, runner=fake).set_entries(link)
+    assert fake.calls == []
+
+
+async def test_sets_follow_the_soundcloud_switch(sc_config):
+    fake = FakeSetYtDlp(set_listing([{"url": PAGE}]))
+    resolver = SoundCloudResolver(replace(sc_config, music_soundcloud_enabled=False), runner=fake)
+    with pytest.raises(SourceDisabled):
+        await resolver.set_entries(SET)
+
+
+def test_set_titles_are_sanitized(sc_config):
+    assert _title_from_slug("a/rainy_night--2") == "Rainy night 2"
