@@ -332,9 +332,9 @@ async def test_turn_ping_refuses_bad_input_and_foreign_channels(client):
         {**TURN, "character_name": ""},
         {**TURN, "extra": 1},
     ):
-        assert (await client.post("/api/v1/turn/announce", json=bad, headers=AUTH)).status == 400, (
-            bad
-        )
+        assert (
+            await client.post("/api/v1/turn/announce", json=bad, headers=AUTH)
+        ).status == 400, bad
     assert (
         await client.post(
             "/api/v1/turn/announce", json={**TURN, "channel_id": "999999999999999999"}, headers=AUTH
