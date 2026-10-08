@@ -23,7 +23,8 @@ routes = web.RouteTableDef()
 # No backtick: the expression is shown inside an inline code span.
 EXPRESSION = re.compile(r"^[0-9dDkKhHlL+\-% ]{1,100}$")
 SNOWFLAKE = re.compile(r"^\d{17,20}$")
-ALLOWED_KEYS = frozenset({"expression", "total", "breakdown", "label", "channel_id"})
+ALLOWED_KEYS = frozenset({"expression", "total", "breakdown", "label", "channel_id", "origin"})
+ORIGINS = {"portal": "rolled in the DM portal", "sheet": "rolled on a character sheet"}
 MAX_TOTAL = 100_000
 
 
@@ -57,7 +58,12 @@ def parse_roll(payload: dict) -> dict:
     ):
         raise ApiError(400, "bad_request", "channel_id must be a Discord id string.")
 
+    origin = payload.get("origin", "portal")
+    if origin not in ORIGINS:
+        raise ApiError(400, "bad_request", "origin must be portal or sheet.")
+
     return {
+        "origin": origin,
         "expression": " ".join(expression.split()),
         "total": total,
         "breakdown": _text(payload, "breakdown", 300, required=True),
@@ -71,7 +77,7 @@ def format_message(roll: dict) -> str:
     head = f"🎲 **{escape(roll['label'])}** " if roll["label"] else "🎲 "
     return (
         f"{head}`{roll['expression']}` → **{roll['total']}**\n"
-        f"-# {escape(roll['breakdown'])} · rolled in the DM portal"
+        f"-# {escape(roll['breakdown'])} · {ORIGINS[roll.get('origin', 'portal')]}"
     )
 
 

@@ -97,7 +97,7 @@ members with **Manage Guild** or the role named by `SESSION_ADMIN_ROLE_ID`.
 | `/character set <user> <name> [campaign]` | Maps a Discord user to a character name, globally or only in one campaign. 🔒 for anyone but yourself. |
 | `/character clear <user> [campaign]` | Removes a mapping. 🔒 for anyone but yourself. |
 | `/character list [campaign]` | Shows all mappings, or one campaign's. |
-| `/init <total> [name]` | Tells the DM your initiative. You roll the dice; the number goes to the DM tracker and is never posted to the channel. |
+| `/init [total] [name] [mode]` | Tells the DM your initiative; the number goes to the DM tracker and is never posted to the channel. With a total, you rolled it. Without one, while the portal shows a battle you are in, the bot rolls d20 plus your sheet's initiative bonus (with advantage or disadvantage if you pick it). |
 | `/campaign list` | Campaigns, their voice channels and session counts. |
 | `/campaign create <name> [voice_channel]` 🔒 | Creates a campaign, optionally owning a voice channel. |
 | `/campaign channel <campaign> [voice_channel]` 🔒 | Sets or clears a campaign's voice channel. |
@@ -671,8 +671,15 @@ list.
 | GET | `/api/v1/transcripts/search?q=&campaign=&limit=` | Full-text search across delivered transcripts, as they are read (after the campaign's corrections). Words only: operators are ignored. Returns `results` and `still_indexing`. |
 | GET | `/api/v1/transcription` | Sessions waiting for a transcript: `uploading` (still on the bot), `waiting` (in the bucket or with the transcriber) or `transcribing`, with `stalled` after 48 hours. |
 | POST | `/api/v1/transcription/sync` | Runs one upload pass and one download pass now. Delivery stays with the bot's own loop. |
-| GET | `/api/v1/initiative` | Totals players sent with `/init`: `{id, label, value, at}`, never a user id. |
+| GET | `/api/v1/initiative` | Totals players sent with `/init`: `{id, user_id, label, value, source, at}`. `user_id` lets the portal put the total on that player's own linked character; `source` is `typed` or `rolled`. |
 | POST | `/api/v1/initiative/clear` | `{id}` drops one, `{}` drops all. |
+| POST | `/api/v1/initiative/roster` | `{campaign_id, entries: [{user_id, label, bonus}]}` (at most 20): the players of the battle the portal is showing, so `/init` can roll for them. Replaces the whole roster. |
+| POST | `/api/v1/initiative/roster/clear` | `{}`: the battle ended or was hidden. |
+| GET | `/api/v1/guild/roles` | The server's roles `{id, name, color, position}`, highest first, without `@everyone` and integration roles. For the portal's access editor. |
+| GET | `/api/v1/guild/channels` | Text channels the bot can post in `{id, name, category}`. For the turn-ping picker. |
+| POST | `/api/v1/campaigns/{id}/characters` | `{user_id, character_name}`: a player's active sheet names their character in that campaign. |
+| POST | `/api/v1/campaigns/{id}/characters/clear` | `{user_id}`: the player has no active sheet there any more. |
+| POST | `/api/v1/turn/announce` | `{channel_id, user_id, character_name, encounter_name, round}`: posts "your turn" mentioning only that member. |
 | GET | `/api/v1/campaigns?archived=1` | Campaigns. |
 | POST | `/api/v1/campaigns` | `{name, channel_id?, language?}` |
 | GET | `/api/v1/campaigns/{id}` | Campaign with its names, corrections and characters (labels only, no user ids). |
@@ -706,7 +713,7 @@ list.
 | POST | `/api/v1/soundboard/prepare` | `{kind, id, source?: youtube\|soundcloud}` — Saves the sound without playing it and returns `{id, title, source, duration_seconds}`. |
 | POST | `/api/v1/soundboard/stop` | `{layer_id}`, `{kind}` or `{}` for everything. |
 | POST | `/api/v1/soundboard/volume` | `{layer_id, volume}` — 0 to 2. |
-| POST | `/api/v1/dice/announce` | `{expression, total, breakdown, label?, channel_id?}` — posts a portal roll to `DICE_CHANNEL_ID` (or the named channel of this server), mentions disabled. |
+| POST | `/api/v1/dice/announce` | `{expression, total, breakdown, label?, channel_id?, origin?}` (`origin`: `portal` or `sheet`, which only changes the footer) — posts a portal roll to `DICE_CHANNEL_ID` (or the named channel of this server), mentions disabled. |
 
 Errors are always `{"error": {"code": ..., "message": ...}}`. 401 bad token,
 404 missing, 409 state conflict (already recording, queue full), 413/415 bad

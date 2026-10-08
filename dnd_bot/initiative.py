@@ -1,16 +1,18 @@
 """Initiative totals players report from Discord.
 
-Players roll their own dice and tell the bot the total. The bot only holds the
-number until the DM applies it in the portal's tracker; it does not know which
-encounter, if any, is running. Everything here is pure so the slash command and
-the API share one set of rules.
+Players roll their own dice and tell the bot the total, or, when the portal is
+showing them a battle, let the bot roll with their sheet's bonus. The bot only
+holds the number until the DM applies it in the portal's tracker. Everything
+here is pure so the slash command and the API share one set of rules.
 """
 
 from __future__ import annotations
 
 import re
+import secrets
 import time
 import unicodedata
+from collections.abc import Callable
 
 VALUE_MIN = -20
 VALUE_MAX = 60
@@ -52,3 +54,21 @@ class Cooldown:
             return False
         self._last[key] = now
         return True
+
+
+MODES = ("normal", "advantage", "disadvantage")
+
+
+def roll_initiative(
+    bonus: int, mode: str = "normal", d20: Callable[[], int] | None = None
+) -> tuple[int, str]:
+    """d20 + bonus, with two dice for advantage or disadvantage. Returns (total, breakdown)."""
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}")
+    roll = d20 or (lambda: secrets.randbelow(20) + 1)
+    dice = [roll()] if mode == "normal" else [roll(), roll()]
+    kept = max(dice) if mode == "advantage" else min(dice) if mode == "disadvantage" else dice[0]
+    total = max(VALUE_MIN, min(VALUE_MAX, kept + bonus))
+    shown = str(dice[0]) if len(dice) == 1 else f"{dice[0]}, {dice[1]} → {kept}"
+    sign = "+" if bonus >= 0 else "-"
+    return total, f"[{shown}] {sign} {abs(bonus)}"

@@ -95,14 +95,16 @@ async def client(config: Config, db: Database):
         yield test_client
 
 
-async def test_api_lists_labels_and_totals_but_no_user_ids(client, db):
+async def test_api_lists_reports_with_the_reporting_member(client, db):
     await db.add_initiative(123456789012345678, "Thorin", 17)
+    await db.add_initiative(223456789012345678, "Elenya", 12, source="rolled")
     response = await client.get("/api/v1/initiative", headers=AUTH)
-    text = await response.text()
-    body = json.loads(text)
+    body = json.loads(await response.text())
     assert body[0]["label"] == "Thorin" and body[0]["value"] == 17
-    assert set(body[0]) == {"id", "label", "value", "at"}
-    assert "123456789012345678" not in text
+    assert set(body[0]) == {"id", "user_id", "label", "value", "source", "at"}
+    # The portal matches a report to that player's own combatant by this id.
+    assert body[0]["user_id"] == "123456789012345678" and body[0]["source"] == "typed"
+    assert body[1]["source"] == "rolled"
     assert (await client.get("/api/v1/initiative")).status == 401
 
 
