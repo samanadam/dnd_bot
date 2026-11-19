@@ -6,3 +6,5 @@ py-cord[voice] @ git+https://github.com/Pycord-Development/pycord@10a5e8cf13bd8d
 aiosqlite==0.20.0
 python-dotenv==1.0.1
 boto3==1.35.99
+# Unpinned, a rebuild pulled 0.2.0 and the bot stopped being heard in voice.
+davey==0.1.6
