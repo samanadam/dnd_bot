@@ -28,6 +28,7 @@ from typing import Any
 
 import discord
 
+from .cast import CastError, CastManager
 from .mixer import Layer, MixerSource
 from .net import ffmpeg_protocol_args, looks_like_a_flag
 
@@ -155,6 +156,7 @@ class MusicManager:
         # Injected so tests never need ffmpeg on PATH.
         self._source_factory = source_factory or self._ffmpeg_source
         self._clock = clock
+        self.cast = CastManager(clock) if config.music_cast_enabled else None
         self._players: dict[int, GuildPlayer] = {}
         self._locks: dict[int, asyncio.Lock] = {}
 
@@ -243,6 +245,9 @@ class MusicManager:
         The ffmpeg protocol whitelist is the important line here: without it a
         URI is free to name file:// or concat: and read this host's disk.
         """
+        if track.source == "cast":
+            self._start_cast(player, track)
+            return
         local = track.source == "r2"
         if not track.uri or looks_like_a_flag(track.uri):
             raise MusicError("That track has no usable source.")
@@ -254,6 +259,19 @@ class MusicManager:
             before = f"{before} -ss {seek:.2f}".strip()
 
         source = self._source_factory(track.uri, volume=player.volume, before_options=before)
+        self._hand_to_voice(player, track, source, seek)
+
+    def _start_cast(self, player: GuildPlayer, track: Track) -> None:
+        """A cast is already PCM, so it skips ffmpeg and the protocol checks."""
+        if self.cast is None:
+            raise MusicError("Casting is turned off on this bot.")
+        try:
+            raw = self.cast.source_for(track.uri)
+        except CastError as exc:
+            raise MusicError(str(exc)) from exc
+        self._hand_to_voice(player, track, discord.PCMVolumeTransformer(raw, player.volume), 0.0)
+
+    def _hand_to_voice(self, player: GuildPlayer, track: Track, source: Any, seek: float) -> None:
         player.epoch += 1
         callback = self._after_callback(player.guild_id, player.epoch)
 
@@ -496,6 +514,8 @@ class MusicManager:
             track = player.current
             if track is None or player.voice_client is None:
                 raise MusicError("Nothing is playing.")
+            if track.source == "cast":
+                raise MusicError("A live cast cannot be moved within.")
             if not 0.0 <= position <= MAX_SEEK_SECONDS:
                 raise MusicError("That position is out of range.")
             if track.duration_seconds is not None and position >= track.duration_seconds:
@@ -511,6 +531,8 @@ class MusicManager:
         player = self.player(guild_id)
         if player.current is None or player.voice_client is None:
             raise MusicError("Nothing is playing.")
+        if player.current.source == "cast":
+            raise MusicError("A live cast cannot be paused; stop it instead.")
         if self._mixer_active(player):
             # Pausing the client would silence the ambience too.
             player.mixer.main_paused = True
@@ -607,6 +629,9 @@ class MusicManager:
             player.mixer.remove_layers(lambda _layer: True)
         was_playing = player.current
         self._halt(player)
+        if self.cast is not None and was_playing is not None and was_playing.source == "cast":
+            self.cast.stop()
+            was_playing = None
         if was_playing is not None:
             # Preserve what was playing at the head of the queue so a rebind,
             # or the operator, can pick it straight back up.
@@ -874,7 +899,7 @@ class MusicManager:
             "current": player.current.to_dict() if player.current else None,
             "queue": [track.to_dict() for track in player.queue],
             "sources": {name: source.enabled for name, source in self.sources.items()},
-        }
+        } | ({"cast": self.cast.summary()} if self.cast is not None else {})
 
 
 class _suppress:

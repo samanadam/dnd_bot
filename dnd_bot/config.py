@@ -109,6 +109,8 @@ class Config:
     dice_channel_id: int | None = None
 
     music_enabled: bool = False
+    # Live casts of a browser tab. Off unless asked for; needs music and the API.
+    music_cast_enabled: bool = False
     music_r2_prefix: str = "music"
     music_default_volume: float = 0.3
     music_max_queue: int = 100
@@ -381,6 +383,7 @@ def load_config() -> Config:
         ready_timeout_seconds=ready_timeout_seconds,
         dice_channel_id=dice_channel_id,
         music_enabled=music_enabled,
+        music_cast_enabled=_get_bool("MUSIC_CAST_ENABLED", False),
         music_r2_prefix=_get("MUSIC_R2_PREFIX", "music").strip("/"),
         music_default_volume=music_default_volume,
         music_max_queue=_get_int("MUSIC_MAX_QUEUE", 100),

@@ -823,3 +823,74 @@ async def test_a_track_started_while_the_next_one_resolves_wins(set_manager):
     assert player.current.id == "urgent"
     # Nothing was dropped: b is back at the front, c behind it.
     assert [t.id for t in player.queue] == ["b", "c"]
+
+
+# -- live casts --------------------------------------------------------------
+
+
+@pytest.fixture
+def casting(music_config, voice, clock):
+    config = replace(music_config, music_cast_enabled=True)
+    guild = FakeGuild({2: FakeChannel(2, voice)})
+    return MusicManager(FakeBot(config, guild), config, sources={}, clock=clock)
+
+
+def cast_track(manager):
+    session, _ = manager.cast.create("Aria")
+    return session, Track(id=session.id, title="Live: Aria", source="cast", uri=session.id)
+
+
+async def test_a_cast_plays_through_the_voice_client_without_ffmpeg(casting, voice):
+    session, live = cast_track(casting)
+    await casting.play(1, live, channel_id=2, position="now")
+    assert casting.state_summary(1)["current"]["source"] == "cast"
+    assert casting.state_summary(1)["cast"]["by_name"] == "Aria"
+    assert voice.source.original is session.source
+
+
+async def test_a_cast_cannot_be_paused_or_sought(casting):
+    _, live = cast_track(casting)
+    await casting.play(1, live, channel_id=2, position="now")
+    with pytest.raises(MusicError):
+        await casting.pause(1)
+    with pytest.raises(MusicError):
+        await casting.seek(1, 5.0)
+
+
+async def test_when_the_cast_ends_the_queue_carries_on(casting, voice):
+    await casting.play(1, track("a"), channel_id=2)
+    await casting.play(1, track("b"), channel_id=2)
+    session, live = cast_track(casting)
+    await casting.play(1, live, channel_id=2, position="now")
+    assert [t.id for t in casting.player(1).queue] == ["b"]
+    casting.cast.end(session)
+    voice.finish_track()
+    await drain()
+    assert casting.player(1).current.id == "b"
+
+
+async def test_taking_over_replaces_the_cast_without_advancing_the_queue(casting, voice):
+    await casting.play(1, track("q"), channel_id=2)
+    first, live = cast_track(casting)
+    await casting.play(1, live, channel_id=2, position="now")
+    second, live2 = cast_track(casting)
+    await casting.play(1, live2, channel_id=2, position="now")
+    await drain()
+    assert casting.player(1).current.id == second.id
+    assert first.source.closed
+    assert casting.cast.source_for(second.id) is second.source
+
+
+async def test_a_cast_is_not_requeued_when_the_recorder_takes_the_voice(casting):
+    _, live = cast_track(casting)
+    await casting.play(1, live, channel_id=2, position="now")
+    await casting.detach(1, "recording")
+    assert not casting.player(1).queue
+    assert casting.cast.summary() is None
+
+
+async def test_a_dead_cast_cannot_start(casting):
+    session, live = cast_track(casting)
+    casting.cast.end(session)
+    with pytest.raises(MusicError):
+        await casting.play(1, live, channel_id=2, position="now")

@@ -89,6 +89,7 @@ def build_app(bot) -> web.Application:
         pass
 
     from .routes_campaigns import routes as campaign_routes
+    from .routes_cast import routes as cast_routes
     from .routes_dice import routes as dice_routes
     from .routes_guild import routes as guild_routes
     from .routes_initiative import routes as initiative_routes
@@ -99,6 +100,7 @@ def build_app(bot) -> web.Application:
     from .routes_turns import routes as turn_routes
 
     app.add_routes(campaign_routes)
+    app.add_routes(cast_routes)
     app.add_routes(dice_routes)
     app.add_routes(guild_routes)
     app.add_routes(turn_routes)
