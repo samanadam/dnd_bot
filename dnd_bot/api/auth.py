@@ -20,7 +20,9 @@ from .keys import CONFIG, RATE_LIMITER
 
 # Paths served without a token. The healthcheck must answer before anyone is
 # holding a credential, and it deliberately reveals nothing but liveness.
-PUBLIC_PATHS = frozenset({"/api/v1/health"})
+# The cast socket authenticates itself: a browser cannot send a bearer header on
+# a WebSocket, and must never hold the token. See routes_cast.py.
+PUBLIC_PATHS = frozenset({"/api/v1/health", "/api/v1/cast/ws"})
 
 # Writes that reach a live recording or an external resolver are capped well
 # below the general limit, whatever that is set to.
@@ -30,6 +32,7 @@ TIGHT_LIMIT_PREFIXES = (
     "/api/v1/music/set",
     "/api/v1/music/play-set",
     "/api/v1/music/upload",
+    "/api/v1/cast/",
     "/api/v1/transcripts/search",
     "/api/v1/transcription/sync",
 )
