@@ -14,7 +14,7 @@ from aiohttp import WSMsgType
 from aiohttp.test_utils import TestClient, TestServer
 
 from dnd_bot.api.server import build_app
-from dnd_bot.cast import CAP_FRAMES, TARGET_FRAMES, CastManager, CastSource
+from dnd_bot.cast import CAP_FRAMES, RESUME_FRAMES, TARGET_FRAMES, CastManager, CastSource
 from dnd_bot.config import Config
 from dnd_bot.mixer import FRAME_BYTES, SILENCE
 
@@ -46,6 +46,28 @@ def test_overflow_drops_the_oldest_audio():
     source.feed(b"\x02" * FRAME_BYTES * 2)
     assert len(source._buffer) == TARGET_FRAMES * FRAME_BYTES
     assert source._buffer.endswith(b"\x02" * FRAME_BYTES * 2)
+
+
+def test_trimming_after_a_burst_drops_whole_samples_only():
+    source = CastSource()
+    source.feed(b"" * (FRAME_BYTES * CAP_FRAMES + 2))
+    source.feed(b"" * 6)
+    assert source.shed_events == 1
+    # Nothing was read, so everything missing from the buffer was trimmed; an
+    # odd cut would leave the rest of the cast one byte off and sounding like static.
+    assert (source.fed_bytes - len(source._buffer)) % 4 == 0
+
+
+def test_after_a_dry_spell_it_restarts_at_the_smaller_cushion():
+    source = CastSource()
+    source.feed(b"" * FRAME_BYTES * TARGET_FRAMES)
+    while source.read() != SILENCE:
+        pass
+    assert source.underruns == 1
+    source.feed(b"" * FRAME_BYTES * (RESUME_FRAMES - 1))
+    assert source.read() == SILENCE
+    source.feed(b"" * FRAME_BYTES)
+    assert source.read() == b"" * FRAME_BYTES
 
 
 def test_finish_ends_the_track_and_cleanup_closes_it():

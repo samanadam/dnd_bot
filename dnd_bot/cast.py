@@ -36,10 +36,15 @@ MAX_BYTES_PER_SECOND = 64 * 1024
 RATE_WINDOW_SECONDS = 5.0
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_NAME_CHARS = 40
+# 16-bit stereo: the smallest unit audio can be cut on.
+SAMPLE_BYTES = 4
 
 # Aim to hold 300 ms before playing, and never hold more than 2 s: past that the
 # oldest audio is dropped so the delay cannot grow.
-TARGET_FRAMES = 15
+TARGET_FRAMES = 20
+# After the buffer ran dry, restart at half the cushion: a shorter gap than a full
+# refill, and the buffer keeps growing again while it plays.
+RESUME_FRAMES = 10
 CAP_FRAMES = 100
 
 # Input is whitelisted to the pipe and the container to webm, so the bytes a
@@ -84,8 +89,14 @@ class CastSource(discord.AudioSource):
         self._lock = threading.Lock()
         self._buffer = bytearray()
         self._primed = False
+        self._started = False
         self._ended = False
         self.closed = False
+        # Counted for the log line when a cast ends: how often it ran dry or
+        # had to shed audio is what tells a slow link from a bad decode.
+        self.underruns = 0
+        self.shed_events = 0
+        self.fed_bytes = 0
 
     # -- event loop side ---------------------------------------------------
 
@@ -94,12 +105,17 @@ class CastSource(discord.AudioSource):
             if self.closed:
                 return
             self._buffer += pcm
+            self.fed_bytes += len(pcm)
             cap = CAP_FRAMES * FRAME_BYTES
             if len(self._buffer) > cap:
-                # Keep the newest audio, aligned to a frame.
-                keep = TARGET_FRAMES * FRAME_BYTES
-                del self._buffer[: len(self._buffer) - keep]
-            if len(self._buffer) >= TARGET_FRAMES * FRAME_BYTES:
+                # Keep the newest audio. The cut must land on a whole stereo
+                # sample (4 bytes): an odd offset turns the rest of the cast
+                # into static.
+                excess = len(self._buffer) - TARGET_FRAMES * FRAME_BYTES
+                del self._buffer[: excess - excess % SAMPLE_BYTES]
+                self.shed_events += 1
+            need = RESUME_FRAMES if self._started else TARGET_FRAMES
+            if len(self._buffer) >= need * FRAME_BYTES:
                 self._primed = True
 
     def finish(self) -> None:
@@ -116,8 +132,11 @@ class CastSource(discord.AudioSource):
                 return b""
             if not self._primed or len(self._buffer) < FRAME_BYTES:
                 # Underrun: wait for the buffer to refill instead of stuttering.
+                if self._primed:
+                    self.underruns += 1
                 self._primed = False
                 return SILENCE
+            self._started = True
             frame = bytes(self._buffer[:FRAME_BYTES])
             del self._buffer[:FRAME_BYTES]
             return frame
@@ -194,7 +213,16 @@ class CastManager:
             del self._tickets[ticket]
         if self._active is session:
             self._active = None
-        session.source.finish()
+        source = session.source
+        log.info(
+            "Cast %s ended after %.0fs: %d KB decoded, %d underruns, %d overflow trims",
+            session.id,
+            time.time() - session.started_at,
+            source.fed_bytes // 1024,
+            source.underruns,
+            source.shed_events,
+        )
+        source.finish()
         proc, session.proc = session.proc, None
         if proc is not None and proc.returncode is None:
             try:
