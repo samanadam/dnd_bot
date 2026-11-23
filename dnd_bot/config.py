@@ -107,6 +107,8 @@ class Config:
     # Text channel for dice rolls sent from the portal. The portal may also name
     # a channel per roll; either way it must be a channel of the configured guild.
     dice_channel_id: int | None = None
+    # The portal's public address, for party notes written in Discord. Empty = off.
+    portal_url: str = ""
 
     music_enabled: bool = False
     # Live casts of a browser tab. Off unless asked for; needs music and the API.
@@ -382,6 +384,7 @@ def load_config() -> Config:
         api_rate_limit_per_minute=_get_int("API_RATE_LIMIT_PER_MINUTE", 60),
         ready_timeout_seconds=ready_timeout_seconds,
         dice_channel_id=dice_channel_id,
+        portal_url=_get("PORTAL_URL").rstrip("/"),
         music_enabled=music_enabled,
         music_cast_enabled=_get_bool("MUSIC_CAST_ENABLED", False),
         music_r2_prefix=_get("MUSIC_R2_PREFIX", "music").strip("/"),
