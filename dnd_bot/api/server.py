@@ -93,6 +93,7 @@ def build_app(bot) -> web.Application:
     from .routes_dice import routes as dice_routes
     from .routes_guild import routes as guild_routes
     from .routes_initiative import routes as initiative_routes
+    from .routes_partynotes import routes as partynote_routes
     from .routes_sessions import routes as session_routes
     from .routes_soundboard import routes as soundboard_routes
     from .routes_transcription import routes as transcription_routes
@@ -104,6 +105,7 @@ def build_app(bot) -> web.Application:
     app.add_routes(dice_routes)
     app.add_routes(guild_routes)
     app.add_routes(turn_routes)
+    app.add_routes(partynote_routes)
     app.add_routes(initiative_routes)
     app.add_routes(session_routes)
     app.add_routes(soundboard_routes)
