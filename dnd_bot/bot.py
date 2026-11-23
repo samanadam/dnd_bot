@@ -47,7 +47,8 @@ def build_intents() -> discord.Intents:
     intents.guilds = True
     intents.voice_states = True
     intents.members = True
-    intents.message_content = False
+    # Needed to read what is said in a campaign's party notes channel (privileged).
+    intents.message_content = True
     return intents
 
 
@@ -97,6 +98,7 @@ class DnDBot(discord.Bot):
         self.load_extension("dnd_bot.cogs.character")
         self.load_extension("dnd_bot.cogs.campaign")
         self.load_extension("dnd_bot.cogs.initiative")
+        self.load_extension("dnd_bot.cogs.partynotes")
 
     # -- lifecycle ---------------------------------------------------------
 
